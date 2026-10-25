@@ -47,7 +47,7 @@ BUY_DROP_RATIO = env_float("BUY_DROP_RATIO", 0.99)       # شراء عند هب�
 SELL_GAIN_RATIO = env_float("SELL_GAIN_RATIO", 1.012)    # جني ربح عند +1.2%
 STOP_LOSS_RATIO = env_float("STOP_LOSS_RATIO", 0.97)     # وقف خسارة عند -3%
 
-LOOP_SLEEP = 30               # ثواني بين كل فحص
+LOOP_SLEEP = 60               # ثواني بين كل فحص
 WAIT_COOLDOWN = 300           # انتظار بعد قرار WAIT (ثواني)
 STOP_LOSS_COOLDOWN = 1800     # انتظار بعد وقف الخسارة (ثواني)
 KLINE_LIMIT = 12              # عدد شموع 15 دقيقة للمرجع (~3 ساعات)
