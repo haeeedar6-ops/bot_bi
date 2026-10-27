@@ -40,8 +40,8 @@ def env_float(name, default):
 BINANCE_API_KEY = os.environ.get("BINANCE_API_KEY")
 BINANCE_API_SECRET = os.environ.get("BINANCE_API_SECRET")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
-QUICK_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")                 # فلتر الشراء السريع
-ANALYSIS_MODEL = os.environ.get("GEMINI_ANALYSIS_MODEL", "gemini-2.5-pro")       # التحليل المعمّق
+QUICK_MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.8-flash")                 # فلتر الشراء السريع + احتياطي للتحليل
+ANALYSIS_MODEL = os.environ.get("GEMINI_ANALYSIS_MODEL", "gemini-4-argon")       # التحليل المعمّق
 DASHBOARD_PASSWORD = os.environ.get("DASHBOARD_PASSWORD", "")
 
 # التداول حقيقي افتراضياً. للتجربة بدون أوامر حقيقية حط DRY_RUN=true
