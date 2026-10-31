@@ -1,23 +1,36 @@
 import os
+import re
 import time
 import math
 import json
 import hmac
 import logging
+import urllib.request
+import urllib.parse
+import xml.etree.ElementTree as ET
 from functools import wraps
 from datetime import datetime
-from threading import Thread
+from threading import Thread, Lock
 
 from flask import Flask, jsonify, request, Response
 from binance.client import Client
 from binance.exceptions import BinanceAPIException
 
+GENAI_IMPORT_ERROR = ""
+GROQ_IMPORT_ERROR = ""
 try:
-    from google import genai as genai_new
+    from google import genai as genai_lib
     from google.genai import types as genai_types
-except Exception:  # البوت يشتغل حتى لو مكتبة Gemini مو موجودة
-    genai_new = None
+except Exception as e:
+    genai_lib = None
     genai_types = None
+    GENAI_IMPORT_ERROR = str(e)[:150]
+
+try:
+    from groq import Groq
+except Exception as e:
+    Groq = None
+    GROQ_IMPORT_ERROR = str(e)[:150]
 
 # ==========================================
 # 1. الإعدادات (كلها قابلة للتغيير من متغيرات Render)
@@ -33,59 +46,110 @@ logger = logging.getLogger(__name__)
 def env_float(name, default):
     try:
         return float(os.environ.get(name, default))
-    except ValueError:
+    except (TypeError, ValueError):
         return float(default)
+
+
+def env_int(name, default):
+    try:
+        return int(float(os.environ.get(name, default)))
+    except (TypeError, ValueError):
+        return int(default)
+
+
+def env_list(name, default):
+    raw = os.environ.get(name, default)
+    return [x.strip() for x in raw.split(",") if x.strip()]
 
 
 BINANCE_API_KEY = os.environ.get("BINANCE_API_KEY")
 BINANCE_API_SECRET = os.environ.get("BINANCE_API_SECRET")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
-QUICK_MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.8-flash")                 # فلتر الشراء السريع + احتياطي للتحليل
-ANALYSIS_MODEL = os.environ.get("GEMINI_ANALYSIS_MODEL", "gemini-4-argon")       # التحليل المعمّق
+GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
 DASHBOARD_PASSWORD = os.environ.get("DASHBOARD_PASSWORD", "")
 
-# التداول حقيقي افتراضياً. للتجربة بدون أوامر حقيقية حط DRY_RUN=true
-DRY_RUN = os.environ.get("DRY_RUN", "false").lower() == "true"
+# نماذج الذكاء: بتجرب بالترتيب، أول واحد يرد بيُعتمد. أضف أو غيّر من Render بدون تعديل الكود
+GEMINI_MODELS = env_list("GEMINI_MODELS", "gemini-4-argon,gemini-3.8-flash")
+GROQ_MODELS = env_list("GROQ_MODELS", "llama-3.3-70b-versatile,llama-3.1-8b-instant")
+QUOTA_BLOCK_MIN = env_int("QUOTA_BLOCK_MIN", 60)       # النموذج اللي خلص حده يتوقف هالقد دقيقة
 
+# مصادر الأخبار (RSS). أي مصدر يفشل بيتجاهل بدون ما يوقف شي
+NEWS_FEEDS = env_list(
+    "NEWS_FEEDS",
+    "https://www.coindesk.com/arc/outboundfeeds/rss/,https://cointelegraph.com/rss,https://decrypt.co/feed"
+)
+
+DRY_RUN = os.environ.get("DRY_RUN", "false").lower() == "true"
 SYMBOL = os.environ.get("SYMBOL", "TAOUSDT")
 COIN_ASSET = os.environ.get("COIN_ASSET", "TAO")
 
 BUY_DROP_RATIO = env_float("BUY_DROP_RATIO", 0.99)       # شراء عند هبوط 1% عن أعلى سعر قريب
-SELL_GAIN_RATIO = env_float("SELL_GAIN_RATIO", 1.012)    # جني ربح عند +1.2%
-STOP_LOSS_RATIO = env_float("STOP_LOSS_RATIO", 0.97)     # وقف خسارة عند -3%
-FEE_RATE = env_float("FEE_RATE", 0.001)                  # عمولة Binance لكل جهة (0.1%)
+SELL_GAIN_RATIO = env_float("SELL_GAIN_RATIO", 1.025)    # جني ربح عند +2.5%
+STOP_LOSS_RATIO = env_float("STOP_LOSS_RATIO", 0.98)     # وقف خسارة عند -2%
+FEE_RATE = env_float("FEE_RATE", 0.001)
+
+# حماية من الصفقات الكثيرة والخاسرة
+MAX_TRADES_PER_DAY = env_int("MAX_TRADES_PER_DAY", 4)
+LOSS_COOLDOWN_MIN = env_int("LOSS_COOLDOWN_MIN", 60)     # بعد أي صفقة خاسرة
+STOP_COOLDOWN_MIN = env_int("STOP_COOLDOWN_MIN", 120)    # بعد وقف الخسارة
+MAX_RSI_BUY = env_float("MAX_RSI_BUY", 65)               # ما نشتري إذا السعر طالع كتير
 
 LOOP_SLEEP = 15
 WAIT_COOLDOWN = 300
-STOP_LOSS_COOLDOWN = 1800
 KLINE_LIMIT = 12
+NEWS_CACHE_SEC = 1200
 
 STATE_FILE = os.environ.get("STATE_FILE", "bot_state_dry.json" if DRY_RUN else "bot_state.json")
 
 client = Client(BINANCE_API_KEY, BINANCE_API_SECRET)
 
-if genai_new and GEMINI_API_KEY:
-    gclient = genai_new.Client(api_key=GEMINI_API_KEY)
+PROVIDER_STATUS = {}
+gclient = None
+if not GEMINI_API_KEY:
+    PROVIDER_STATUS["gemini"] = "ما في GEMINI_API_KEY"
+elif genai_lib is None:
+    PROVIDER_STATUS["gemini"] = "مكتبة google-genai مو منصّبة: " + GENAI_IMPORT_ERROR
 else:
-    gclient = None
-    logger.warning("الذكاء الاصطناعي مو شغال (ما في مفتاح Gemini أو مكتبة google-genai). البوت رح يعتمد على الفلتر الرياضي بس.")
+    try:
+        gclient = genai_lib.Client(api_key=GEMINI_API_KEY)
+        PROVIDER_STATUS["gemini"] = "مفعّل"
+    except Exception as e:
+        PROVIDER_STATUS["gemini"] = "فشل التشغيل: " + str(e)[:120]
+
+groq_client = None
+if not GROQ_API_KEY:
+    PROVIDER_STATUS["groq"] = "ما في GROQ_API_KEY (اختياري)"
+elif Groq is None:
+    PROVIDER_STATUS["groq"] = "مكتبة groq مو منصّبة: " + GROQ_IMPORT_ERROR
+else:
+    try:
+        groq_client = Groq(api_key=GROQ_API_KEY, timeout=45.0, max_retries=0)
+        PROVIDER_STATUS["groq"] = "مفعّل"
+    except Exception as e:
+        PROVIDER_STATUS["groq"] = "فشل التشغيل: " + str(e)[:120]
+
+if not gclient and not groq_client:
+    logger.warning("ما في أي مزود ذكاء شغال: " + json.dumps(PROVIDER_STATUS, ensure_ascii=False))
 
 # إعدادات يتحكم فيها الموقع
 control = {
-    "running": True,            # تشغيل/إيقاف الشراء الجديد
-    "sell_now": False,          # طلب بيع فوري
-    "buy_now": False,           # طلب شراء فوري
-    "analyze_now": False,       # طلب تحليل فوري
-    "mode": os.environ.get("TRADE_MODE", "all"),             # all = كامل الرصيد | usdt = مبلغ ثابت | percent = نسبة
+    "running": True,
+    "sell_now": False,
+    "buy_now": False,
+    "analyze_now": False,
+    "mode": os.environ.get("TRADE_MODE", "all"),
     "value": env_float("TRADE_VALUE", 10.0),
-    "analysis_interval": int(env_float("ANALYSIS_INTERVAL_MIN", 60)),   # كل كم دقيقة يحلل
-    "ai_block": True,           # الذكاء يمنع الشراء وقت خطر الهبوط الكبير
-    "adopt": True,              # استخدام عملات TAO الموجودة بالمحفظة
-    "stance": "unsure",         # رأيك: unsure | drop | stable
-    "notes": "",                # ملاحظاتك عن السوق
+    "analysis_interval": env_int("ANALYSIS_INTERVAL_MIN", 15),
+    "ai_block": True,
+    "adopt": True,
+    "stance": "unsure",
+    "notes": "",
 }
 PERSIST_CONTROL = ("mode", "value", "analysis_interval", "ai_block", "adopt", "stance", "notes")
-runtime = {"cooldown_until": 0.0}
+runtime = {"cooldown_until": 0.0, "last_rsi": None, "last_change": 0.0}
+blocked_models = {}          # مفتاح النموذج -> وقت انتهاء الحظر المؤقت
+analysis_lock = Lock()
+news_cache = {"ts": 0.0, "items": []}
 
 bot_status = {
     "mode": "DRY_RUN" if DRY_RUN else "LIVE",
@@ -106,10 +170,11 @@ analysis = {
     "running": False, "outlook": "", "risk": "", "confidence": 0,
     "summary": "", "world_says": "", "points": [], "user_view": "",
     "time": "", "time_ts": 0.0, "duration": 0.0,
-    "used_search": False, "model": "", "error": "", "next_at": 0.0,
+    "source": "", "attempts": [], "news": [], "rule_based": False,
+    "error": "", "next_at": 0.0,
 }
-ANALYSIS_SAVE_KEYS = ("outlook", "risk", "confidence", "summary", "world_says", "points",
-                      "user_view", "time", "time_ts", "duration", "used_search", "model")
+ANALYSIS_SAVE_KEYS = ("outlook", "risk", "confidence", "summary", "world_says", "points", "user_view",
+                      "time", "time_ts", "duration", "source", "attempts", "news", "rule_based")
 
 # ==========================================
 # 2. الحالة (حفظ واسترجاع)
@@ -117,6 +182,7 @@ ANALYSIS_SAVE_KEYS = ("outlook", "risk", "confidence", "summary", "world_says", 
 state = {
     "in_position": False, "buy_price": 0.0, "qty": 0.0,
     "history": [], "total_profit": 0.0, "wins": 0, "losses": 0,
+    "day": "", "trades_today": 0,
 }
 
 
@@ -133,15 +199,15 @@ def load_state():
         state["total_profit"] = float(data.get("total_profit", 0.0))
         state["wins"] = int(data.get("wins", 0))
         state["losses"] = int(data.get("losses", 0))
+        state["day"] = str(data.get("day", ""))
+        state["trades_today"] = int(data.get("trades_today", 0))
 
-        mode = data.get("c_mode", data.get("mode"))
-        if mode in ("all", "usdt", "percent"):
-            control["mode"] = mode
-        for key in ("value",):
-            if data.get("c_" + key, data.get(key)) is not None:
-                control[key] = float(data.get("c_" + key, data.get(key)))
+        if data.get("c_mode") in ("all", "usdt", "percent"):
+            control["mode"] = data["c_mode"]
+        if data.get("c_value") is not None:
+            control["value"] = float(data["c_value"])
         if data.get("c_analysis_interval"):
-            control["analysis_interval"] = int(data["c_analysis_interval"])
+            control["analysis_interval"] = max(5, int(data["c_analysis_interval"]))
         for key in ("ai_block", "adopt"):
             if ("c_" + key) in data:
                 control[key] = bool(data["c_" + key])
@@ -174,6 +240,13 @@ def save_state():
 def set_event(text):
     bot_status["last_event"] = f"{datetime.now().strftime('%H:%M:%S')} - {text}"
     logger.info(text)
+
+
+def check_day():
+    today = datetime.now().strftime("%Y-%m-%d")
+    if state["day"] != today:
+        state["day"] = today
+        state["trades_today"] = 0
 
 
 # ==========================================
@@ -239,9 +312,10 @@ ul{margin:6px 0 0;padding-right:18px;font-size:14px}
     <div class="lbl">السعر اللحظي</div>
     <div class="big" id="price">-</div>
     <div class="small">حالة البوت: <span id="stateBadge" class="badge b-wait">-</span></div>
+    <div class="small">صفقات اليوم: <span id="todayTrades">-</span></div>
   </div>
 
-  <div class="card" id="posCard">
+  <div class="card">
     <div class="lbl" id="posTitle">الصفقة الحالية</div>
     <div class="big" id="pnl">-</div>
     <div class="row" style="margin-top:10px">
@@ -280,11 +354,11 @@ ul{margin:6px 0 0;padding-right:18px;font-size:14px}
       <div><button class="btn-buy" id="buyBtn" onclick="buyNow()">شراء فوري</button></div>
       <div><button class="btn-sell" id="sellBtn" onclick="sellNow()">بيع فوري</button></div>
     </div>
-    <div class="small">الإيقاف بيمنع الشراء التلقائي بس. الصفقة المفتوحة بتضل مراقبة. الشراء الفوري بيتجاهل الفلاتر.</div>
+    <div class="small">الإيقاف بيمنع الشراء التلقائي بس. الشراء الفوري بيتجاهل الفلاتر.</div>
   </div>
 
   <div class="card">
-    <div class="lbl">🧠 تحليل السوق (Gemini)</div>
+    <div class="lbl">🧠 تحليل السوق</div>
     <div id="aiStatus" class="small" style="margin-top:0">-</div>
     <div class="row" style="margin-top:10px">
       <div><div class="lbl">التوقع</div><div class="val" id="aiOutlook">-</div></div>
@@ -301,6 +375,11 @@ ul{margin:6px 0 0;padding-right:18px;font-size:14px}
     <ul id="aiPoints"></ul>
     <div class="lbl" style="margin-top:12px">رد الذكاء على رأيك</div>
     <div id="aiUser" style="font-size:14px">-</div>
+    <div class="lbl" style="margin-top:12px">أخبار استخدمها التحليل</div>
+    <ul id="aiNews"></ul>
+    <div class="lbl" style="margin-top:12px">محاولات المزودين</div>
+    <div id="aiAttempts" class="small">-</div>
+    <div id="aiProv" class="small">-</div>
     <div class="small" id="aiNext"></div>
     <div style="height:10px"></div>
     <button class="btn-save" id="analyzeBtn" onclick="analyzeNow()">حلل الآن</button>
@@ -315,13 +394,13 @@ ul{margin:6px 0 0;padding-right:18px;font-size:14px}
     </select>
     <div style="height:8px"></div>
     <textarea id="aiNotes" rows="4" maxlength="1000" placeholder="اكتب شو شايف بالسوق، أخبار، أسباب..."></textarea>
-    <div class="lbl" style="margin-top:10px">كل كم دقيقة يحلل</div>
-    <input id="aiInterval" type="number" min="10" max="1440" step="1">
+    <div class="lbl" style="margin-top:10px">كل كم دقيقة يحلل (5 لـ 1440)</div>
+    <input id="aiInterval" type="number" min="5" max="1440" step="1">
     <label class="chk"><input type="checkbox" id="aiBlock"> الذكاء يمنع الشراء وقت خطر هبوط كبير</label>
     <label class="chk"><input type="checkbox" id="adopt"> استخدم عملات TAO الموجودة بالمحفظة</label>
     <div style="height:10px"></div>
     <button class="btn-save" onclick="saveAi()">حفظ</button>
-    <div class="small" id="aiMsg">رأيك بيدخل بالتحليل كمعلومة، والذكاء ممكن يخالفك إذا الأرقام تقول غير هيك.</div>
+    <div class="small" id="aiMsg">رأيك بيدخل بالتحليل كمعلومة، والذكاء ممكن يخالفك إذا الأرقام والأخبار تقول غير هيك.</div>
   </div>
 
   <div class="card">
@@ -374,11 +453,8 @@ async function api(path, body){
 async function doLogin(){
   pw = $('pw').value;
   $('err').textContent='';
-  try{
-    await api('/api/status');
-    localStorage.setItem('pw', pw);
-    start();
-  }catch(e){ $('err').textContent = e.message; }
+  try{ await api('/api/status'); localStorage.setItem('pw', pw); start(); }
+  catch(e){ $('err').textContent = e.message; }
 }
 
 function logout(){
@@ -395,13 +471,8 @@ function start(){
 }
 
 async function refresh(){
-  try{
-    const d = await api('/api/status');
-    lastData = d;
-    render(d);
-  }catch(e){
-    if(e.auth){ logout(); $('err').textContent=e.message; }
-  }
+  try{ const d = await api('/api/status'); lastData = d; render(d); }
+  catch(e){ if(e.auth){ logout(); $('err').textContent=e.message; } }
 }
 
 function renderAI(a){
@@ -409,9 +480,9 @@ function renderAI(a){
   const rb={low:['منخفض','green'],medium:['متوسط','gold'],high:['عالي','red']};
 
   if(a.running){ $('aiStatus').textContent='⏳ جاري التحليل...'; }
-  else if(a.error){ $('aiStatus').textContent='⚠️ '+a.error; }
-  else if(a.time){ $('aiStatus').textContent='آخر تحليل: '+a.time+(a.used_search?' (مع بحث بالإنترنت)':' (بدون بحث)')+(a.model?' - '+a.model:''); }
+  else if(a.time){ $('aiStatus').textContent='آخر تحليل: '+a.time+' - المصدر: '+(a.source||'-')+(a.rule_based?' ⚠️':''); }
   else { $('aiStatus').textContent='ما صار تحليل لسا'; }
+  if(a.error){ $('aiStatus').textContent += ' | ⚠️ '+a.error; }
 
   const o=ob[a.outlook]; const r=rb[a.risk];
   $('aiOutlook').textContent=o?o[0]:'-'; $('aiOutlook').className='val '+(o?o[1]:'gray');
@@ -421,9 +492,15 @@ function renderAI(a){
   $('aiSummary').textContent=a.summary||'-';
   $('aiWorld').textContent=a.world_says||'-';
   $('aiUser').textContent=a.user_view||'-';
+  $('aiAttempts').textContent=(a.attempts&&a.attempts.length)?a.attempts.join(' • '):'-';
+  $('aiProv').textContent='المزودين: '+Object.entries(a.providers||{}).map(([k,v])=>k+' = '+v).join(' | ');
 
   const ul=$('aiPoints'); ul.innerHTML='';
   (a.points||[]).forEach(p=>{ const li=document.createElement('li'); li.textContent=p; ul.appendChild(li); });
+
+  const nl=$('aiNews'); nl.innerHTML='';
+  (a.news||[]).forEach(n=>{ const li=document.createElement('li'); li.textContent=(n.rel?'⭐ ':'')+(n.title_ar||n.title)+(n.src?' ('+n.src+')':''); nl.appendChild(li); });
+  if(!(a.news||[]).length){ const li=document.createElement('li'); li.textContent='ما في أخبار جديدة'; nl.appendChild(li); }
 
   if(a.running){ $('aiNext').textContent=''; }
   else if(a.next_in!==null && a.next_in!==undefined){ $('aiNext').textContent='التحليل الجاي بعد '+fmtDur(a.next_in); }
@@ -438,11 +515,12 @@ function render(d){
   mb.className = 'mode ' + (s.mode==='LIVE'?'m-live':'m-dry');
 
   $('price').textContent = fmt(s.current_price,4)+' $';
+  $('todayTrades').textContent = (d.trades_today||0)+' / '+d.max_trades_day;
 
   const sb=$('stateBadge');
   const map={in_position:['داخل صفقة (بانتظار البيع)','b-pos'],
              stopped:['متوقف','b-stop'],
-             cooldown:['استراحة قصيرة','b-cool'],
+             cooldown:['استراحة (بعد صفقة)','b-cool'],
              waiting:['بانتظار فرصة شراء','b-wait']};
   const m=map[d.state_code]||map.waiting;
   sb.textContent=m[0]; sb.className='badge '+m[1];
@@ -518,7 +596,8 @@ async function sellNow(){
 }
 
 async function analyzeNow(){
-  try{ await api('/api/control',{action:'analyze_now'}); $('aiStatus').textContent='⏳ جاري التحليل...'; $('analyzeBtn').disabled=true; setTimeout(refresh,1500); }catch(e){ alert(e.message); }
+  try{ await api('/api/control',{action:'analyze_now'}); $('aiStatus').textContent='⏳ جاري التحليل...'; $('analyzeBtn').disabled=true; setTimeout(refresh,1500); }
+  catch(e){ alert(e.message); }
 }
 
 function onModeChange(){ $('setVal').hidden = ($('setMode').value==='all'); }
@@ -526,8 +605,7 @@ function onModeChange(){ $('setVal').hidden = ($('setMode').value==='all'); }
 async function saveSettings(){
   try{
     await api('/api/settings',{mode:$('setMode').value, value:parseFloat($('setVal').value)});
-    $('setMsg').textContent='انحفظ ✅';
-    refresh();
+    $('setMsg').textContent='انحفظ ✅'; refresh();
   }catch(e){ $('setMsg').textContent=e.message; }
 }
 
@@ -537,8 +615,7 @@ async function saveAi(){
       stance:$('aiStance').value, notes:$('aiNotes').value,
       interval:parseInt($('aiInterval').value), ai_block:$('aiBlock').checked, adopt:$('adopt').checked
     });
-    $('aiMsg').textContent='انحفظ ✅';
-    refresh();
+    $('aiMsg').textContent='انحفظ ✅'; refresh();
   }catch(e){ $('aiMsg').textContent=e.message; }
 }
 
@@ -586,10 +663,12 @@ def health():
 @app.route('/api/status')
 @require_auth
 def api_status():
+    check_day()
     tp_price = state["buy_price"] * SELL_GAIN_RATIO if state["in_position"] else 0.0
     sl_price = state["buy_price"] * STOP_LOSS_RATIO if state["in_position"] else 0.0
     a = dict(analysis)
     a["next_in"] = max(0, int(analysis["next_at"] - time.time())) if analysis["next_at"] else None
+    a["providers"] = PROVIDER_STATUS
     return jsonify({
         "status": bot_status,
         "state": state,
@@ -598,6 +677,8 @@ def api_status():
         "state_code": current_state_code(),
         "tp_price": tp_price,
         "sl_price": sl_price,
+        "trades_today": state["trades_today"],
+        "max_trades_day": MAX_TRADES_PER_DAY,
     })
 
 
@@ -665,8 +746,8 @@ def api_ai_settings():
         interval = int(data.get("interval"))
     except (TypeError, ValueError):
         return jsonify({"error": "مدة التحليل لازم تكون رقم (دقائق)"}), 400
-    if not (10 <= interval <= 1440):
-        return jsonify({"error": "مدة التحليل بين 10 و 1440 دقيقة"}), 400
+    if not (5 <= interval <= 1440):
+        return jsonify({"error": "مدة التحليل بين 5 و 1440 دقيقة"}), 400
     stance = data.get("stance")
     if stance not in ("unsure", "drop", "stable"):
         return jsonify({"error": "الرأي غلط"}), 400
@@ -695,7 +776,6 @@ def get_market_data():
     ticker = client.get_ticker(symbol=SYMBOL)
     current_price = float(ticker['lastPrice'])
     avg_24h_price = float(ticker['weightedAvgPrice'])
-
     klines = client.get_klines(symbol=SYMBOL, interval=Client.KLINE_INTERVAL_15MINUTE, limit=KLINE_LIMIT)
     recent_closes = [float(k[4]) for k in klines]
     return current_price, avg_24h_price, recent_closes
@@ -733,7 +813,7 @@ def refresh_balances(price):
 def compute_trade_amount():
     usdt_free = bot_status["usdt_free"]
     if control["mode"] == "all":
-        amount = usdt_free * 0.995   # كامل الرصيد مع هامش صغير للعمولة وفرق السعر
+        amount = usdt_free * 0.995
     elif control["mode"] == "percent":
         amount = usdt_free * control["value"] / 100.0
     else:
@@ -761,26 +841,6 @@ def calc_rsi(closes, period=14):
     return round(100 - 100 / (1 + avg_g / avg_l), 1)
 
 
-# ==========================================
-# 5. الذكاء الاصطناعي (فلتر سريع + تحليل معمّق)
-# ==========================================
-def gemini_generate(prompt, model, use_search=False):
-    cfg = None
-    if use_search:
-        cfg = genai_types.GenerateContentConfig(
-            tools=[genai_types.Tool(google_search=genai_types.GoogleSearch())]
-        )
-    resp = gclient.models.generate_content(model=model, contents=prompt, config=cfg)
-    return resp.text or ""
-
-
-def parse_json_block(text):
-    a, b = text.find("{"), text.rfind("}")
-    if a == -1 or b == -1 or b <= a:
-        raise ValueError("رد الذكاء ما كان بصيغة صحيحة")
-    return json.loads(text[a:b + 1])
-
-
 def build_market_snapshot():
     t = client.get_ticker(symbol=SYMBOL)
     btc = client.get_ticker(symbol="BTCUSDT")
@@ -801,92 +861,288 @@ def build_market_snapshot():
     }
 
 
-ANALYSIS_SCHEMA = """{
-  "outlook": "bullish | neutral | bearish | crash_risk",
-  "risk_big_drop": "low | medium | high",
-  "confidence": 0-100,
-  "summary": "جملتين بالعامية الشامية عن توقعك للـ 24 ساعة الجاية",
-  "world_says": "جملة وحدة: شو بتحكي الأخبار والمحللين والمجتمع اليوم عن العملة",
-  "points": ["نقطة قصيرة", "نقطة قصيرة", "نقطة قصيرة"],
-  "user_view": "جملة وحدة: رأيك برأي المستخدم وملاحظاته، مع السبب إذا مخالف"
-}"""
+# ==========================================
+# 5. الأخبار (من مصادر حقيقية RSS)
+# ==========================================
+ar_cache = {}
 
 
-def build_analysis_prompt(snap):
+def translate_ar(texts):
+    """ترجمة للعربي عبر خدمة Google Translate المجانية. إذا فشلت بيرجع النص الأصلي."""
+    out = []
+    for t in texts:
+        if t in ar_cache:
+            out.append(ar_cache[t])
+            continue
+        result = t
+        try:
+            q = urllib.parse.quote(t[:500])
+            url = f"https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl=ar&dt=t&q={q}"
+            req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+            translated = "".join(seg[0] for seg in data[0] if seg and seg[0])
+            if translated.strip():
+                result = translated
+        except Exception as e:
+            logger.warning(f"تعذر ترجمة خبر: {str(e)[:80]}")
+        ar_cache[t] = result
+        out.append(result)
+    return out
+
+
+def fetch_news():
+    if time.time() - news_cache["ts"] < NEWS_CACHE_SEC and news_cache["items"]:
+        return news_cache["items"]
+
+    items = []
+    for url in NEWS_FEEDS:
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                root = ET.fromstring(resp.read())
+            src = re.sub(r"^https?://(www\.)?", "", url).split("/")[0]
+            for it in root.iter("item"):
+                title = (it.findtext("title") or "").strip()
+                desc = re.sub(r"<[^>]+>", "", it.findtext("description") or "")[:300]
+                if title:
+                    items.append({"title": title[:200], "desc": desc, "src": src,
+                                  "pub": (it.findtext("pubDate") or "")[:30]})
+        except Exception as e:
+            logger.warning(f"تعذر جلب الأخبار من {url}: {str(e)[:100]}")
+
+    rel_re = re.compile(r"bittensor|\bTAO\b", re.I)
+    mkt_re = re.compile(r"bitcoin|crypto|ethereum|market", re.I)
+    related = [i for i in items if rel_re.search(i["title"] + " " + i["desc"])]
+    market = [i for i in items if i not in related and mkt_re.search(i["title"] + " " + i["desc"])]
+    for i in related:
+        i["rel"] = True
+    for i in market:
+        i["rel"] = False
+    chosen = (related[:6] + market[:4])
+
+    titles_ar = translate_ar([i["title"] for i in chosen])
+    for i, ar in zip(chosen, titles_ar):
+        i["title_ar"] = ar
+
+    news_cache["ts"] = time.time()
+    news_cache["items"] = chosen
+    return chosen
+
+
+# ==========================================
+# 6. الذكاء الاصطناعي: سلسلة مزودين بدون فشل
+# ==========================================
+SYS_PROMPT = "أنت محلل أسواق كريبتو محترف. تجيب دائماً بصيغة JSON فقط بدون أي نص آخر، وما تخترع أخبار."
+
+
+def classify_error(e):
+    low = str(e).lower()
+    if "429" in low or "resource_exhausted" in low or "rate limit" in low or "rate_limit" in low or "quota" in low:
+        return "quota"
+    if "503" in low or "unavailable" in low or "overloaded" in low or "timeout" in low or "timed out" in low:
+        return "busy"
+    if ("404" in low or "not_found" in low or "not found" in low or "decommission" in low
+            or "model_not_found" in low or "403" in low or "permission" in low or "invalid model" in low):
+        return "bad"
+    return "other"
+
+
+def call_gemini(prompt, model, search, max_tokens):
+    cfg = genai_types.GenerateContentConfig(
+        system_instruction=SYS_PROMPT,
+        max_output_tokens=max_tokens,
+        tools=[genai_types.Tool(google_search=genai_types.GoogleSearch())] if search else None,
+    )
+    resp = gclient.models.generate_content(model=model, contents=prompt, config=cfg)
+    return (getattr(resp, "text", None) or "").strip()
+
+
+def call_groq(prompt, model, max_tokens):
+    resp = groq_client.chat.completions.create(
+        model=model,
+        messages=[
+            {"role": "system", "content": SYS_PROMPT},
+            {"role": "user", "content": prompt},
+        ],
+        temperature=0.2,
+        max_tokens=max_tokens,
+    )
+    return (resp.choices[0].message.content or "").strip()
+
+
+def provider_chain(quick):
+    chain = []
+    if gclient:
+        for m in GEMINI_MODELS:
+            if not quick:
+                chain.append(("gemini", m, True))    # مع بحث بالإنترنت
+            chain.append(("gemini", m, False))       # بدون بحث
+    if groq_client:
+        for m in GROQ_MODELS:
+            chain.append(("groq", m, False))
+    return chain
+
+
+def ask_ai(prompt, max_tokens=1200, quick=False):
+    """يرجع (النص, اسم المصدر, قائمة المحاولات). ما بيرمي خطأ أبداً."""
+    attempts = []
+    now = time.time()
+    for prov, model, search in provider_chain(quick):
+        key = f"{prov}:{model}"
+        label = f"{model}{' +بحث' if search else ''}"
+        if now < blocked_models.get(key, 0):
+            continue
+        if search and now < blocked_models.get(key + ":s", 0):
+            continue
+        try:
+            if prov == "gemini":
+                text = call_gemini(prompt, model, search, max_tokens * 2 if not quick else 1024)
+            else:
+                text = call_groq(prompt, model, max_tokens if not quick else 16)
+            if not text:
+                attempts.append(f"{label}: رد فاضي")
+                continue
+            return text, label, attempts
+        except Exception as e:
+            kind = classify_error(e)
+            attempts.append(f"{label}: {kind}")
+            logger.warning(f"فشل {label} ({kind}): {str(e)[:200]}")
+            if kind == "quota":
+                blocked_models[key] = time.time() + QUOTA_BLOCK_MIN * 60
+            elif kind == "bad":
+                blocked_models[key] = time.time() + 6 * 3600
+            elif kind == "busy":
+                blocked_models[key] = time.time() + 180
+            elif search:
+                blocked_models[key + ":s"] = time.time() + 1800
+            else:
+                blocked_models[key] = time.time() + 300
+    return None, "", attempts
+
+
+def parse_json_block(text):
+    a, b = text.find("{"), text.rfind("}")
+    if a == -1 or b == -1 or b <= a:
+        raise ValueError("الرد ما فيه JSON")
+    return json.loads(text[a:b + 1])
+
+
+def build_analysis_prompt(snap, news):
     stance_text = {
         "drop": "المستخدم شايف إن السوق رح ينزل كتير.",
         "stable": "المستخدم شايف إن السوق ما رح ينزل كتير.",
         "unsure": "المستخدم ما عنده رأي محدد.",
     }[control["stance"]]
     notes = control["notes"].strip() or "(ما كتب ملاحظات)"
+    news_lines = "\n".join(
+        f"- [{n['src']}{' | يخص TAO' if n.get('rel') else ''}] {n['title']}: {n.get('desc', '')[:160]}"
+        for n in news
+    ) or "(ما وصلت أخبار من المصادر)"
     return (
-        f"أنت محلل أسواق كريبتو محترف. حلل العملة {COIN_ASSET} مقابل USDT "
-        f"(إذا كانت TAO فهي Bittensor) لتتوقع الـ 24 ساعة الجاية. التاريخ اليوم {datetime.now().strftime('%Y-%m-%d')}.\n"
-        "ابحث بالإنترنت عن آخر الأخبار والأحداث ومزاج المحللين والمجتمع اليوم عن العملة والسوق عموماً، وادمجها مع الأرقام.\n\n"
+        f"اكتب كل الإجابة بالعربي الفصحى المبسطة حتى لو الأخبار إنجليزي. حلل العملة {COIN_ASSET} مقابل USDT (TAO = Bittensor) لتتوقع الـ 24 ساعة الجاية. "
+        f"التاريخ اليوم {datetime.now().strftime('%Y-%m-%d')}.\n\n"
         f"أرقام السوق من Binance:\n{json.dumps(snap, ensure_ascii=False)}\n\n"
+        f"أحدث الأخبار (من مصادر حقيقية، اعتمد عليها بس):\n{news_lines}\n\n"
         f"رأي المستخدم: {stance_text}\nملاحظاته: {notes}\n"
-        "ملاحظة: رأي المستخدم معلومة وحدة بس، وزنها مقابل الأرقام والأخبار، وخالفها بصراحة إذا الأدلة تقول غير هيك.\n\n"
-        "أجب بـ JSON فقط بدون أي نص قبله أو بعده وبدون علامات ```، بهالشكل:\n" + ANALYSIS_SCHEMA
+        "رأي المستخدم معلومة وحدة بس، وزنها مقابل الأرقام والأخبار، وخالفه بصراحة إذا الأدلة تقول غير هيك. "
+        "إذا ما في أخبار واضحة، اكتب ذلك بـ world_says ولا تخترع.\n\n"
+        "أجب بـ JSON فقط بدون أي نص قبله أو بعده وبدون علامات ```، بهالشكل:\n"
+        '{"outlook": "bullish | neutral | bearish | crash_risk", '
+        '"risk_big_drop": "low | medium | high", "confidence": 0-100, '
+        '"summary": "جملتين بالعامية الشامية عن توقعك للـ 24 ساعة", '
+        '"world_says": "جملة: شو بتحكي الأخبار اليوم عن العملة", '
+        '"points": ["نقطة", "نقطة", "نقطة"], '
+        '"user_view": "جملة: رأيك برأي المستخدم وملاحظاته"}'
     )
 
 
-def ask_with_fallbacks(prompt):
-    attempts = [(ANALYSIS_MODEL, True), (ANALYSIS_MODEL, False)]
-    if QUICK_MODEL != ANALYSIS_MODEL:
-        attempts += [(QUICK_MODEL, True), (QUICK_MODEL, False)]
-    last_err = None
-    for model, use_search in attempts:
-        try:
-            return gemini_generate(prompt, model, use_search), model, use_search
-        except Exception as e:
-            last_err = e
-            logger.warning(f"فشل التحليل بـ {model} (بحث={use_search}): {e}")
-    raise RuntimeError(f"فشلت كل محاولات Gemini: {str(last_err)[:150]}")
+def rule_analysis(snap):
+    """تحليل احتياطي بالأرقام لما كل الذكاء يفشل. ما بيفشل."""
+    ch = snap["change_24h_pct"]
+    rsi = snap["rsi_1h"]
+    if ch <= -8 or (rsi is not None and rsi < 20):
+        outlook, risk = "crash_risk", "high"
+    elif ch <= -4:
+        outlook, risk = "bearish", "medium"
+    elif ch >= 4:
+        outlook, risk = "bullish", "low"
+    else:
+        outlook, risk = "neutral", "medium"
+    return {
+        "outlook": outlook,
+        "risk_big_drop": risk,
+        "confidence": 30,
+        "summary": f"التغير خلال 24 ساعة {ch:+.2f}%، ومؤشر RSI للساعة {rsi}. تحليل بالأرقام فقط.",
+        "world_says": "ما قدرنا نجيب تحليل أخبار الآن، شوف الأخبار المعروضة تحت.",
+        "points": [f"التغير 24 ساعة: {ch:+.2f}%", f"RSI ساعة: {rsi}", f"BTC 24 ساعة: {snap['btc_change_24h_pct']:+.2f}%"],
+        "user_view": "",
+    }
+
+
+def apply_analysis(r, source, attempts, news, rule_based):
+    outlook = r.get("outlook") if r.get("outlook") in ("bullish", "neutral", "bearish", "crash_risk") else "neutral"
+    risk = r.get("risk_big_drop") if r.get("risk_big_drop") in ("low", "medium", "high") else "medium"
+    try:
+        conf = max(0, min(100, int(r.get("confidence", 0))))
+    except (TypeError, ValueError):
+        conf = 0
+    analysis.update({
+        "outlook": outlook,
+        "risk": risk,
+        "confidence": conf,
+        "summary": str(r.get("summary", ""))[:400],
+        "world_says": str(r.get("world_says", ""))[:400],
+        "points": [str(p)[:200] for p in (r.get("points") or [])][:4],
+        "user_view": str(r.get("user_view", ""))[:400],
+        "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "time_ts": time.time(),
+        "source": source,
+        "attempts": attempts[-6:],
+        "news": [{"title": n["title"], "title_ar": n.get("title_ar", n["title"]), "src": n["src"], "rel": bool(n.get("rel"))} for n in news],
+        "rule_based": rule_based,
+        "error": "",
+        "next_at": time.time() + control["analysis_interval"] * 60,
+    })
 
 
 def run_analysis():
-    if analysis["running"]:
+    if not analysis_lock.acquire(blocking=False):
         return
     analysis["running"] = True
-    analysis["error"] = ""
     started = time.time()
     try:
-        if not gclient:
-            raise RuntimeError("الذكاء مو شغال: تأكد من GEMINI_API_KEY ومكتبة google-genai")
         snap = build_market_snapshot()
-        text, model_used, used_search = ask_with_fallbacks(build_analysis_prompt(snap))
-        r = parse_json_block(text)
+        runtime["last_rsi"] = snap["rsi_1h"]
+        runtime["last_change"] = snap["change_24h_pct"]
+        news = fetch_news()
 
-        outlook = r.get("outlook") if r.get("outlook") in ("bullish", "neutral", "bearish", "crash_risk") else "neutral"
-        risk = r.get("risk_big_drop") if r.get("risk_big_drop") in ("low", "medium", "high") else "medium"
-        try:
-            conf = max(0, min(100, int(r.get("confidence", 0))))
-        except (TypeError, ValueError):
-            conf = 0
-        analysis.update({
-            "outlook": outlook, "risk": risk, "confidence": conf,
-            "summary": str(r.get("summary", ""))[:400],
-            "world_says": str(r.get("world_says", ""))[:400],
-            "points": [str(p)[:200] for p in (r.get("points") or [])][:4],
-            "user_view": str(r.get("user_view", ""))[:400],
-            "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            "time_ts": time.time(),
-            "used_search": used_search, "model": model_used,
-            "next_at": time.time() + control["analysis_interval"] * 60,
-        })
-        set_event(f"تحليل جديد: {outlook} | خطر هبوط {risk}")
-        save_state()
+        text, source, attempts = ask_ai(build_analysis_prompt(snap, news), max_tokens=1200)
+        r = None
+        if text:
+            try:
+                r = parse_json_block(text)
+            except Exception as e:
+                attempts.append(f"تنسيق الرد: {str(e)[:60]}")
+        if r is None:
+            r = rule_analysis(snap)
+            apply_analysis(r, "قواعد داخلية (ما في مزود ذكاء مفعّل)" if not (gclient or groq_client) else "قواعد داخلية (الذكاء ما رد)", attempts, news, True)
+        else:
+            apply_analysis(r, source, attempts, news, False)
+        set_event(f"تحليل جديد: {analysis['outlook']} | خطر هبوط {analysis['risk']} | {analysis['source']}")
     except Exception as e:
-        analysis["error"] = str(e)[:200]
-        analysis["next_at"] = time.time() + 600
+        analysis["error"] = f"تعذر جلب بيانات Binance: {str(e)[:120]}"
+        analysis["next_at"] = time.time() + 300
         logger.error(f"خطأ بالتحليل: {e}")
     finally:
         analysis["duration"] = round(time.time() - started, 1)
         analysis["running"] = False
+        analysis_lock.release()
+        save_state()
 
 
 def analysis_loop():
-    time.sleep(25)  # انتظار أول اتصال بـ Binance
+    time.sleep(25)
     while True:
         try:
             if control["analyze_now"] or time.time() >= analysis["next_at"]:
@@ -902,52 +1158,63 @@ def ai_blocks_buy():
         return False
     max_age = max(2 * control["analysis_interval"] * 60, 7200)
     if time.time() - analysis["time_ts"] > max_age:
-        return False  # التحليل قديم، ما منعتمد عليه
+        return False
     return analysis["risk"] == "high" or analysis["outlook"] == "crash_risk"
 
 
 def math_filter_ok(current_price, avg_24h, recent):
     if current_price < avg_24h * 0.95:
-        logger.info("الفلتر الرياضي: السعر أقل من متوسط 24 ساعة بأكثر من 5% (ممنوع).")
-        return False
+        return False, "السعر أقل من متوسط 24 ساعة بأكثر من 5%"
     if len(recent) >= 4:
         last3 = recent[-3:]
         falling = last3[0] > last3[1] > last3[2]
         drop = (recent[-4] - current_price) / recent[-4]
         if falling and drop > 0.02:
-            logger.info("الفلتر الرياضي: هبوط متواصل وسريع (ممنوع).")
-            return False
-    return True
+            return False, "هبوط متواصل وسريع"
+    return True, ""
 
 
-def gemini_says_buy(current_price, avg_24h, recent):
-    if not gclient:
-        return True
+def quick_buy_decision(price, avg_24h, recent):
+    """يرجع (قرار, سبب). يعتمد على الذكاء، وإذا ما في ذكاء يعتمد على القواعد."""
+    rsi = runtime.get("last_rsi")
+    change = runtime.get("last_change", 0.0)
     ctx = ""
-    if analysis["outlook"]:
-        ctx = f"آخر تحليل معمّق: التوقع {analysis['outlook']}، خطر الهبوط الكبير {analysis['risk']}.\n"
-    prompt = f"""
-    أنت خبير مخاطر تداول خوارزمي. نراقب عملة {SYMBOL}.
-    السعر الحالي: {current_price}
-    متوسط سعر 24 ساعة: {avg_24h}
-    إغلاقات آخر شموع (15 دقيقة) من الأقدم للأحدث: {recent}
-    {ctx}
-    السعر نزل 1% وصار مهيأ للشراء. هل هالهبوط طبيعي وآمن للشراء الارتدادي،
-    أو في انهيار حاد مستمر يستوجب الانتظار؟
-    أجب بكلمة وحدة فقط: BUY أو WAIT
-    """
-    try:
-        text = gemini_generate(prompt, QUICK_MODEL).strip().upper()
-        decision = "BUY" if "BUY" in text and "WAIT" not in text else "WAIT"
-        logger.info(f"قرار Gemini: {decision}")
-        return decision == "BUY"
-    except Exception as e:
-        logger.warning(f"تعذر الوصول لـ Gemini ({e}) - اعتمدنا على الفلتر الرياضي.")
-        return True
+    if analysis["time_ts"]:
+        ctx = f"آخر تحليل: {analysis['outlook']}، خطر الهبوط الكبير {analysis['risk']}. "
+    prompt = (
+        f"عملة {SYMBOL}. السعر {price}، متوسط 24 ساعة {avg_24h:.4f}، RSI ساعة {rsi}، "
+        f"تغير 24 ساعة {change:+.2f}%، آخر إغلاقات 15 دقيقة {recent}. {ctx}"
+        "السعر نزل قرب 1% من أعلى قريب. هل الشراء الارتدادي آمن الآن؟ "
+        "أجب بكلمة وحدة فقط: BUY أو WAIT"
+    )
+    text, src, _ = ask_ai(prompt, max_tokens=16, quick=True)
+    if text:
+        up = text.upper()
+        if "BUY" in up and "WAIT" not in up:
+            return True, f"الذكاء ({src}) قال BUY"
+        return False, f"الذكاء ({src}) قال WAIT"
+    ok = rsi is not None and rsi < 40 and change > -8
+    return ok, ("ما في ذكاء متاح، القواعد قالت " + ("شراء" if ok else "انتظار"))
+
+
+def buy_allowed(price, avg_24h, recent):
+    """يرجع (مسموح؟, سبب)."""
+    check_day()
+    if state["trades_today"] >= MAX_TRADES_PER_DAY:
+        return False, f"وصلنا الحد اليومي ({MAX_TRADES_PER_DAY} صفقات)"
+    if ai_blocks_buy():
+        return False, "الذكاء شايف خطر هبوط كبير"
+    ok, why = math_filter_ok(price, avg_24h, recent)
+    if not ok:
+        return False, f"الفلتر الرياضي: {why}"
+    rsi = runtime.get("last_rsi")
+    if rsi is not None and rsi > MAX_RSI_BUY:
+        return False, f"RSI {rsi} مرتفع، السعر طالع كتير"
+    return quick_buy_decision(price, avg_24h, recent)
 
 
 # ==========================================
-# 6. تنفيذ الأوامر
+# 7. تنفيذ الأوامر
 # ==========================================
 def avg_fill_price_and_qty(order, fallback_price):
     fills = order.get('fills') or []
@@ -965,12 +1232,14 @@ def do_buy(usdt_amount, current_price, step, min_qty, min_notional):
     if qty < min_qty or qty * current_price < min_notional:
         set_event(f"المبلغ {usdt_amount:.2f}$ صغير على الحد الأدنى للزوج. زيد الرصيد أو حجم الصفقة.")
         return None
-
     if DRY_RUN:
         set_event(f"[تجربة] شراء وهمي {qty} {COIN_ASSET} بسعر {current_price}")
         return current_price, qty
-
-    order = client.order_market_buy(symbol=SYMBOL, quantity=qty)
+    try:
+        order = client.order_market_buy(symbol=SYMBOL, quantity=qty)
+    except BinanceAPIException as e:
+        set_event(f"Binance رفض الشراء: {str(e.message)[:100]}")
+        return None
     buy_price, net_qty = avg_fill_price_and_qty(order, current_price)
     set_event(f"تم الشراء: {net_qty:.6f} {COIN_ASSET} بمتوسط {buy_price:.4f}")
     return buy_price, net_qty
@@ -980,14 +1249,16 @@ def do_sell(qty, current_price, step, min_qty):
     if DRY_RUN:
         set_event(f"[تجربة] بيع وهمي {qty} {COIN_ASSET} بسعر {current_price}")
         return current_price
-
     free_coin = float(client.get_asset_balance(asset=COIN_ASSET)['free'])
     sell_qty = format_qty(min(qty, free_coin), step)
     if sell_qty < min_qty or sell_qty <= 0:
         set_event("الكمية المتاحة للبيع صفر (يمكن انباعت يدوياً). تصفير الحالة.")
         return None
-
-    order = client.order_market_sell(symbol=SYMBOL, quantity=sell_qty)
+    try:
+        order = client.order_market_sell(symbol=SYMBOL, quantity=sell_qty)
+    except BinanceAPIException as e:
+        set_event(f"Binance رفض البيع: {str(e.message)[:100]}")
+        return None
     sell_price, _ = avg_fill_price_and_qty(order, current_price)
     set_event(f"تم البيع: {sell_qty} {COIN_ASSET} بمتوسط {sell_price:.4f}")
     return sell_price
@@ -1012,14 +1283,32 @@ def record_trade(buy_price, sell_price, qty, reason):
     return pnl, pct
 
 
+def open_position(buy_price, qty):
+    check_day()
+    state.update({"in_position": True, "buy_price": buy_price, "qty": qty})
+    state["trades_today"] += 1
+    save_state()
+
+
+def close_position(buy_price, sell_price, qty, reason):
+    pnl, pct = record_trade(buy_price, sell_price, qty, reason)
+    set_event(f"{reason} | النتيجة: {pnl:+.4f} USDT ({pct:+.2f}%)")
+    if reason == "وقف خسارة":
+        runtime["cooldown_until"] = time.time() + STOP_COOLDOWN_MIN * 60
+    elif pnl < 0:
+        runtime["cooldown_until"] = time.time() + LOSS_COOLDOWN_MIN * 60
+    state.update({"in_position": False, "buy_price": 0.0, "qty": 0.0})
+    save_state()
+
+
 def try_adopt(price, step, min_qty, min_notional):
-    """لو في عملات موجودة بالمحفظة، البوت بيتبناها ويديرها (سعر الدخول = السعر الحالي)."""
     qty = format_qty(bot_status["coin_free"], step)
     if qty < min_qty or qty * price < max(min_notional, 5.0):
         return False
-    state.update({"in_position": True, "buy_price": price, "qty": qty})
+    open_position(price, qty)
+    state["trades_today"] -= 1  # التبني مو صفقة جديدة
     save_state()
-    set_event(f"البوت تبنّى {qty} {COIN_ASSET} الموجودة بالمحفظة. سعر الدخول المعتمد = السعر الحالي {price}")
+    set_event(f"البوت تبنّى {qty} {COIN_ASSET} الموجودة بالمحفظة. سعر الدخول المعتمد = {price}")
     return True
 
 
@@ -1032,7 +1321,7 @@ def verify_saved_position():
             state["qty"] = min(state["qty"], free_coin)
             logger.info(f"استرجاع صفقة محفوظة بسعر {state['buy_price']}")
             return
-        logger.warning("الصفقة المحفوظة ما إلها رصيد بالمحفظة (انباعت يدوياً؟). تصفير.")
+        logger.warning("الصفقة المحفوظة ما إلها رصيد بالمحفظة. تصفير.")
         state.update({"in_position": False, "buy_price": 0.0, "qty": 0.0})
         save_state()
     except Exception as e:
@@ -1040,7 +1329,7 @@ def verify_saved_position():
 
 
 # ==========================================
-# 7. المحرك الرئيسي
+# 8. المحرك الرئيسي
 # ==========================================
 def trading_bot_loop():
     logger.info(f"تشغيل البوت - الوضع: {'تجربة (DRY_RUN)' if DRY_RUN else 'حقيقي (LIVE)'}")
@@ -1082,25 +1371,18 @@ def trading_bot_loop():
                     control["buy_now"] = False
                     result = do_buy(compute_trade_amount(), current_price, step, min_qty, min_notional)
                     if result:
-                        state.update({"in_position": True, "buy_price": result[0], "qty": result[1]})
-                        save_state()
+                        open_position(result[0], result[1])
                 elif control["running"] and time.time() >= runtime["cooldown_until"] \
                         and current_price <= reference * BUY_DROP_RATIO:
-                    logger.info(f"السعر {current_price} هبط عن المرجع {reference}. فحص الفلاتر...")
-
-                    if ai_blocks_buy():
-                        set_event("الذكاء منع الشراء: خطر هبوط كبير حسب آخر تحليل.")
-                        runtime["cooldown_until"] = time.time() + WAIT_COOLDOWN
-                    elif math_filter_ok(current_price, avg_24h, recent) and \
-                            gemini_says_buy(current_price, avg_24h, recent):
+                    allowed, reason = buy_allowed(current_price, avg_24h, recent)
+                    if allowed:
                         result = do_buy(compute_trade_amount(), current_price, step, min_qty, min_notional)
                         if result:
-                            state.update({"in_position": True, "buy_price": result[0], "qty": result[1]})
-                            save_state()
+                            open_position(result[0], result[1])
                         else:
                             runtime["cooldown_until"] = time.time() + WAIT_COOLDOWN
                     else:
-                        set_event("تأجيل الشراء (الفلتر قال WAIT).")
+                        set_event(f"تأجيل الشراء: {reason}")
                         runtime["cooldown_until"] = time.time() + WAIT_COOLDOWN
             else:
                 control["buy_now"] = False
@@ -1114,12 +1396,7 @@ def trading_bot_loop():
                     sell_price = do_sell(qty, current_price, step, min_qty)
                     if sell_price is not None:
                         reason = "ربح" if hit_tp else ("وقف خسارة" if hit_sl else "بيع يدوي")
-                        pnl, pct = record_trade(buy_price, sell_price, qty, reason)
-                        set_event(f"{reason} | النتيجة: {pnl:+.4f} USDT ({pct:+.2f}%)")
-                    state.update({"in_position": False, "buy_price": 0.0, "qty": 0.0})
-                    save_state()
-                    if hit_sl:
-                        runtime["cooldown_until"] = time.time() + STOP_LOSS_COOLDOWN
+                        close_position(buy_price, sell_price, qty, reason)
 
             time.sleep(LOOP_SLEEP)
 
@@ -1136,7 +1413,7 @@ def trading_bot_loop():
 
 
 # ==========================================
-# 8. التشغيل
+# 9. التشغيل
 # ==========================================
 load_state()
 
