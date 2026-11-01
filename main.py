@@ -71,7 +71,8 @@ DASHBOARD_PASSWORD = os.environ.get("DASHBOARD_PASSWORD", "")
 # نماذج الذكاء: بتجرب بالترتيب، أول واحد يرد بيُعتمد. أضف أو غيّر من Render بدون تعديل الكود
 GEMINI_MODELS = env_list("GEMINI_MODELS", "gemini-4-argon,gemini-3.8-flash")
 GROQ_MODELS = env_list("GROQ_MODELS", "llama-3.3-70b-versatile,llama-3.1-8b-instant")
-QUOTA_BLOCK_MIN = env_int("QUOTA_BLOCK_MIN", 60)       # النموذج اللي خلص حده يتوقف هالقد دقيقة
+QUOTA_BLOCK_MIN = env_int("QUOTA_BLOCK_MIN", 60)
+AI_PROVIDER_ORDER = [x.lower() for x in env_list("AI_PROVIDER_ORDER", "groq,gemini")]   # الأول بيُجرب أول       # النموذج اللي خلص حده يتوقف هالقد دقيقة
 
 # مصادر الأخبار (RSS). أي مصدر يفشل بيتجاهل بدون ما يوقف شي
 NEWS_FEEDS = env_list(
@@ -973,14 +974,15 @@ def call_groq(prompt, model, max_tokens):
 
 def provider_chain(quick):
     chain = []
-    if gclient:
-        for m in GEMINI_MODELS:
-            if not quick:
-                chain.append(("gemini", m, True))    # مع بحث بالإنترنت
-            chain.append(("gemini", m, False))       # بدون بحث
-    if groq_client:
-        for m in GROQ_MODELS:
-            chain.append(("groq", m, False))
+    for prov in AI_PROVIDER_ORDER:
+        if prov == "groq" and groq_client:
+            for m in GROQ_MODELS:
+                chain.append(("groq", m, False))
+        elif prov == "gemini" and gclient:
+            for m in GEMINI_MODELS:
+                if not quick:
+                    chain.append(("gemini", m, True))    # مع بحث بالإنترنت
+                chain.append(("gemini", m, False))
     return chain
 
 
@@ -1036,11 +1038,12 @@ def build_analysis_prompt(snap, news):
     }[control["stance"]]
     notes = control["notes"].strip() or "(ما كتب ملاحظات)"
     news_lines = "\n".join(
-        f"- [{n['src']}{' | يخص TAO' if n.get('rel') else ''}] {n['title']}: {n.get('desc', '')[:160]}"
-        for n in news
+        f"{i + 1}. [{n['src']}{' | يخص TAO' if n.get('rel') else ''}] {n['title']}: {n.get('desc', '')[:160]}"
+        for i, n in enumerate(news)
     ) or "(ما وصلت أخبار من المصادر)"
     return (
-        f"اكتب كل الإجابة بالعربي الفصحى المبسطة حتى لو الأخبار إنجليزي. حلل العملة {COIN_ASSET} مقابل USDT (TAO = Bittensor) لتتوقع الـ 24 ساعة الجاية. "
+        "اكتب كل الإجابة بالعربي الفصحى المبسطة حتى لو الأخبار إنجليزي. "
+        f"حلل العملة {COIN_ASSET} مقابل USDT (TAO = Bittensor) لتتوقع الـ 24 ساعة الجاية. "
         f"التاريخ اليوم {datetime.now().strftime('%Y-%m-%d')}.\n\n"
         f"أرقام السوق من Binance:\n{json.dumps(snap, ensure_ascii=False)}\n\n"
         f"أحدث الأخبار (من مصادر حقيقية، اعتمد عليها بس):\n{news_lines}\n\n"
@@ -1050,10 +1053,11 @@ def build_analysis_prompt(snap, news):
         "أجب بـ JSON فقط بدون أي نص قبله أو بعده وبدون علامات ```، بهالشكل:\n"
         '{"outlook": "bullish | neutral | bearish | crash_risk", '
         '"risk_big_drop": "low | medium | high", "confidence": 0-100, '
-        '"summary": "جملتين بالعامية الشامية عن توقعك للـ 24 ساعة", '
-        '"world_says": "جملة: شو بتحكي الأخبار اليوم عن العملة", '
+        '"summary": "جملتين بالعربي عن توقعك للـ 24 ساعة", '
+        '"world_says": "جملة بالعربي: شو بتحكي الأخبار اليوم عن العملة", '
         '"points": ["نقطة", "نقطة", "نقطة"], '
-        '"user_view": "جملة: رأيك برأي المستخدم وملاحظاته"}'
+        '"user_view": "جملة بالعربي: رأيك برأي المستخدم وملاحظاته", '
+        '"news_ar": ["ترجمة عنوان 1 بالعربي", "ترجمة عنوان 2 بالعربي"]}'
     )
 
 
@@ -1081,6 +1085,11 @@ def rule_analysis(snap):
 
 
 def apply_analysis(r, source, attempts, news, rule_based):
+    ar_list = r.get("news_ar") or []
+    if isinstance(ar_list, list):
+        for i, n in enumerate(news):
+            if n.get("title_ar") == n["title"] and i < len(ar_list) and str(ar_list[i]).strip():
+                n["title_ar"] = str(ar_list[i]).strip()[:200]
     outlook = r.get("outlook") if r.get("outlook") in ("bullish", "neutral", "bearish", "crash_risk") else "neutral"
     risk = r.get("risk_big_drop") if r.get("risk_big_drop") in ("low", "medium", "high") else "medium"
     try:
