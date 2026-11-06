@@ -1,0 +1,11 @@
+{
+  "name": "Ryn AI — بوت ومنصة تداول RAY/USDT",
+  "short_name": "Ryn Trader",
+  "description": "منصة تداول RAY/USDT باستراتيجية ±2% وفحص القاع ومساعد الذكاء الاصطناعي Ryn",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#0B101E",
+  "theme_color": "#00F5A0",
+  "lang": "ar",
+  "dir": "rtl"
+}
