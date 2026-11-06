@@ -1,16 +1,15 @@
-# 🤖 Ryn AI — منصة وبوت تداول RAY/USDT (GitHub + Render + Chrome PWA)
+# Ryn — بوت تداول Binance (RAY/USDT)
 
-مشروع متكامل يجمع بين:
-1. **واجهة PC وواجهة هاتف (Mobile App UI)** مع إمكانية التثبيت كتطبيق مستقل من متصفح **Google Chrome (PWA)**.
-2. **الروبوت المساعد العائم (Ryn)** بريأكشنات حية وواجهة دردشة تحاكي تطبيق **Gemini**.
-3. **ملف الذاكرة الذاتية (`ryn_memory.json`)** الذي يكتب فيه Ryn استنتاجاته عن السوق ويقرأه قبل كل صفقة.
-4. **استراتيجية (±2%) الصارمة**: فحص استمرار الهبوط والصبر لاصطياد القاع عند نزول -2%، وقفل الدورة بحيث لا تبدأ دورة جديدة إلا بعد تأكيد البيع (+2%) وتحديث الرصيد.
+بوت حقيقي: يتصل بمحفظتك على Binance، يشتري بعد نزول X% ويبيع عند +Y%، ومعه شات Ryn (Groq) يشوف بياناتك الحية.
 
-## خطوات التشغيل على GitHub و Render
-1. ارفع جميع ملفات هذا المجلد إلى مستودع **GitHub** جديد.
-2. في منصة **Render** اختر **New Web Service** واربطه بالمستودع.
-3. في قسم **Environment Variables** على Render أضف مفاتيحك السرية:
-   - `GROQ_API_KEY`
-   - `EXCHANGE_API_KEY`
-   - `EXCHANGE_API_SECRET`
-   - `TRADING_MODE` (`testnet` أو `live`)
+## الإعداد على Render (Environment)
+- `EXCHANGE_API_KEY` و `EXCHANGE_API_SECRET` : مفاتيح Binance (للتجربة: مفاتيح testnet.binance.vision)
+- `GROQ_API_KEY` : للشات وفحص القاع
+- `APP_PASSWORD` : كلمة سر اللوحة (إلزامية في الوضع الحقيقي)
+- `TRADING_MODE` : `testnet` (تجريبي) أو `live` (حقيقي)
+- `MEMORY_FILE_PATH` : مثلاً `/data/ryn_memory.json` مع Disk حتى ما تضيع الذاكرة
+
+## ملاحظات
+- على Binance لا تفعّل صلاحية السحب للمفتاح، وحدّد IP إن أمكن.
+- ضع رابط `/api/health` في UptimeRobot حتى لا ينام السيرفر (البوت يتوقف وقت النوم).
+- اختبار المنطق بدون إنترنت: `python tests/test_engine.py`
