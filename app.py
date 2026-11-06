@@ -60,7 +60,7 @@ class ChatPayload(BaseModel):
     message: str = Field(min_length=1, max_length=1000)
 
 
-@app.get("/")
+@app.api_route("/", methods=["GET", "HEAD"])
 async def index_page() -> FileResponse:
     return FileResponse(os.path.join(BASE_DIR, "templates", "index.html"), headers={"Cache-Control": "no-cache"})
 
