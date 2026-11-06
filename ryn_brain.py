@@ -143,8 +143,10 @@ class RynGroqAssistant:
     def __init__(self, memory_manager: RynMemoryManager) -> None:
         self.memory_manager = memory_manager
         self.api_key = os.getenv("GROQ_API_KEY", "")
-        self.chat_model = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
-        self.fast_model = os.getenv("GROQ_FAST_MODEL", "llama-3.1-8b-instant")
+        self.chat_model = os.getenv("GROQ_MODEL", "openai/gpt-oss-120b")
+        self.fast_model = os.getenv("GROQ_FAST_MODEL", "openai/gpt-oss-20b")
+        # نماذج بديلة تلقائياً إذا أغلقت Groq النموذج (llama-3.3 و llama-3.1-8b أُغلقا في أغسطس 2026)
+        self.fallbacks = ["openai/gpt-oss-120b", "qwen/qwen3.6-27b", "openai/gpt-oss-20b"]
         self.context_provider: Optional[Callable[[], Dict[str, Any]]] = None
         self.client = None
         if self.api_key and Groq is not None:
@@ -156,6 +158,28 @@ class RynGroqAssistant:
     @property
     def enabled(self) -> bool:
         return self.client is not None
+
+    def _complete(self, model: str, **kwargs: Any) -> Any:
+        """استدعاء Groq مع تجربة نماذج بديلة إذا كان النموذج غير موجود."""
+        candidates = [model] + [m for m in self.fallbacks if m != model]
+        last: Optional[Exception] = None
+        for name in candidates:
+            try:
+                kw = dict(kwargs)
+                if name.startswith("openai/gpt-oss"):
+                    kw["extra_body"] = {"reasoning_effort": "low"}  # يقلل التفكير الطويل ويسرّع الرد
+                resp = self.client.chat.completions.create(model=name, **kw)
+                if not (resp.choices[0].message.content or "").strip():
+                    raise ValueError("رد فارغ من النموذج")
+                if name != model:
+                    self.chat_model = name if model == self.chat_model else self.chat_model
+                return resp
+            except Exception as exc:
+                last = exc
+                msg = str(exc).lower()
+                if not ("404" in msg or "model" in msg or "decommission" in msg or "فارغ" in msg):
+                    break
+        raise last  # type: ignore
 
     # ---- فحص القاع (يستدعيه محرك التداول) ----
     def check_if_dip_stabilized(self, metrics: Dict[str, Any], lowest: float) -> Dict[str, Any]:
@@ -172,14 +196,14 @@ class RynGroqAssistant:
             "lowest_dip": lowest,
             "recent_notes": mem["ryn_self_written_market_memory"][:3],
         }
-        resp = self.client.chat.completions.create(
-            model=self.fast_model,
+        resp = self._complete(
+            self.fast_model,
             messages=[
                 {"role": "system", "content": system},
                 {"role": "user", "content": json.dumps(user, ensure_ascii=False)},
             ],
             temperature=0.1,
-            max_tokens=150,
+            max_tokens=800,
             response_format={"type": "json_object"},
         )
         out = json.loads(resp.choices[0].message.content)
@@ -219,11 +243,11 @@ class RynGroqAssistant:
             if m.get("role") in ("user", "assistant")
         ]
         messages = [{"role": "system", "content": system}, *history, {"role": "user", "content": user_message}]
-        resp = self.client.chat.completions.create(
-            model=self.chat_model,
+        resp = self._complete(
+            self.chat_model,
             messages=messages,
             temperature=0.4,
-            max_tokens=700,
+            max_tokens=2000,
             response_format={"type": "json_object"},
         )
         raw = resp.choices[0].message.content or ""

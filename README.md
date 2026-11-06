@@ -4,7 +4,7 @@
 
 ## الإعداد على Render (Environment)
 - `EXCHANGE_API_KEY` و `EXCHANGE_API_SECRET` : مفاتيح Binance (للتجربة: مفاتيح testnet.binance.vision)
-- `GROQ_API_KEY` : للشات وفحص القاع
+- `GROQ_API_KEY` : للشات وفحص القاع (النموذج الافتراضي openai/gpt-oss-120b، وتقدر تغيّره بـ `GROQ_MODEL`)
 - `APP_PASSWORD` : كلمة سر اللوحة (إلزامية في الوضع الحقيقي)
 - `TRADING_MODE` : `testnet` (تجريبي) أو `live` (حقيقي)
 - `MEMORY_FILE_PATH` : مثلاً `/data/ryn_memory.json` مع Disk حتى ما تضيع الذاكرة

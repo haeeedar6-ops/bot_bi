@@ -30,6 +30,19 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
+def explain_binance_error(exc: Exception, mode: str) -> str:
+    """ترجمة أخطاء Binance الشائعة لسبب وحل بالعربي."""
+    msg = str(exc)
+    if "-2015" in msg or "-2014" in msg or "-1022" in msg:
+        other = "حقيقي (live)" if mode == "testnet" else "تجريبي (testnet)"
+        return (f"Binance رفض المفاتيح (-2015). الأسباب المحتملة: (1) المفاتيح مو من نفس وضع البوت الحالي ({mode}) "
+                f"— غالباً مفاتيحك من وضع {other}. (2) مفتاح مقيّد بعناوين IP وسيرفر Render مو ضمنها. "
+                "(3) صلاحية Enable Spot & Margin Trading مو مفعّلة. (4) في فراغ زيادة بالمفتاح أو السر.")
+    if "451" in msg or "restricted location" in msg.lower():
+        return "Binance بيحجب منطقة سيرفر Render. غيّر Region للسيرفر (مثلاً Frankfurt أو Singapore)."
+    return msg[:200]
+
+
 class RayTradingEngine:
     def __init__(self, memory_manager: Any, assistant: Any = None) -> None:
         self.store = memory_manager
@@ -132,7 +145,7 @@ class RayTradingEngine:
         except SoftError as exc:
             raise ValueError(str(exc))
         except Exception as exc:
-            raise ValueError(f"تعذر الاتصال بـ Binance: {exc}")
+            raise ValueError(f"تعذر الاتصال بـ Binance: {explain_binance_error(exc, self.mode)}")
 
         def _w(s: Dict[str, Any]) -> None:
             s["bot"]["running"] = True
@@ -225,7 +238,7 @@ class RayTradingEngine:
         except Exception as exc:
             def _w(s: Dict[str, Any]) -> None:
                 s["bot"]["price_ok"] = False
-                s["bot"]["last_error"] = f"تعذر جلب السعر: {str(exc)[:160]}"
+                s["bot"]["last_error"] = f"تعذر جلب السعر: {explain_binance_error(exc, self.mode)}"
             self.store.update(_w)
             return
         price = m["live_price"]
@@ -240,7 +253,7 @@ class RayTradingEngine:
             try:
                 self.sync_wallet()
             except Exception as exc:
-                self._set_error(f"تعذر قراءة المحفظة: {str(exc)[:160]}")
+                self._set_error(f"تعذر قراءة المحفظة: {explain_binance_error(exc, self.mode)}")
                 return
 
         s = self.store.read_memory()
