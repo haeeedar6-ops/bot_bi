@@ -18,14 +18,16 @@ services:
         sync: false
       - key: TRADING_MODE
         value: testnet
+      - key: POLL_SECONDS
+        value: "2"
       - key: TRADING_PAIR
-        value: RAY/USDT
+        value: BTC/USDT
       - key: DROP_BUY_PERCENT
-        value: "2.0"
+        value: "0.4"
       - key: RISE_SELL_PERCENT
-        value: "2.0"
+        value: "0.4"
       - key: TRADE_ORDER_USDT
-        value: "50.0"
+        value: "10.0"
       # للحفظ الدائم: أضف Disk على Render (خطة مدفوعة) واجعل المسار /data
       # - key: MEMORY_FILE_PATH
       #   value: /data/ryn_memory.json

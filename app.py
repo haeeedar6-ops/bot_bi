@@ -1,4 +1,4 @@
-"""خادم FastAPI: لوحة تحكم + حلقة تداول خلفية + شات Ryn الحقيقي (جاهز لـ Render)."""
+"""خادم FastAPI: لوحة تحكم + حلقة تداول فورية مستقلة + شات المتداول المحترف ومحلل السوق Ryn."""
 
 import asyncio
 import hmac
@@ -21,6 +21,7 @@ memory_manager = RynMemoryManager()
 ryn_ai = RynGroqAssistant(memory_manager)
 engine = RayTradingEngine(memory_manager, ryn_ai)
 ryn_ai.context_provider = engine.snapshot
+ryn_ai.market_analyzer = engine.get_market_analysis
 
 
 async def bot_loop() -> None:
@@ -39,7 +40,7 @@ async def lifespan(_: FastAPI):
     task.cancel()
 
 
-app = FastAPI(title="Ryn AI — بوت تداول Binance", lifespan=lifespan)
+app = FastAPI(title="Ryn Pro — بوت تداول Binance الذكي + محلل السوق", lifespan=lifespan)
 app.mount("/static", StaticFiles(directory=os.path.join(BASE_DIR, "static")), name="static")
 
 
@@ -67,8 +68,11 @@ async def index_page() -> FileResponse:
 
 @app.get("/sw.js")
 async def service_worker() -> FileResponse:
-    return FileResponse(os.path.join(BASE_DIR, "static", "sw.js"), media_type="application/javascript",
-                        headers={"Service-Worker-Allowed": "/", "Cache-Control": "no-cache"})
+    return FileResponse(
+        os.path.join(BASE_DIR, "static", "sw.js"),
+        media_type="application/javascript",
+        headers={"Service-Worker-Allowed": "/", "Cache-Control": "no-cache"},
+    )
 
 
 @app.get("/api/health")
@@ -94,6 +98,33 @@ async def bot_start() -> JSONResponse:
 async def bot_stop() -> JSONResponse:
     engine.stop()
     return JSONResponse(engine.snapshot())
+
+
+@app.post("/api/bot/force-buy", dependencies=[Depends(require_auth)])
+async def bot_force_buy() -> JSONResponse:
+    try:
+        snap = await asyncio.to_thread(engine.force_buy)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return JSONResponse(snap)
+
+
+@app.post("/api/bot/force-sell", dependencies=[Depends(require_auth)])
+async def bot_force_sell() -> JSONResponse:
+    try:
+        snap = await asyncio.to_thread(engine.force_sell)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return JSONResponse(snap)
+
+
+@app.post("/api/bot/reset-cycle", dependencies=[Depends(require_auth)])
+async def bot_reset_cycle() -> JSONResponse:
+    try:
+        snap = await asyncio.to_thread(engine.reset_cycle)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return JSONResponse(snap)
 
 
 @app.post("/api/settings", dependencies=[Depends(require_auth)])

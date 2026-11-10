@@ -1,10 +1,15 @@
-"""ذاكرة Ryn (حفظ آمن على القرص) + عقل الذكاء الاصطناعي عبر Groq."""
+"""ذاكرة Ryn (حفظ آمن على القرص) + شات المتداول المحترف ومحلل السوق عبر Groq.
+
+ملاحظة معمارية:
+- الذكاء الاصطناعي مفصول تماماً عن تنفيذ أوامر الشراء والبيع حتى لا يسبب أي تأخير (Latency/Slippage).
+- دور الذكاء الاصطناعي هنا حصرياً للشات: يعمل كمتداول ومحلل سوق محترف يقرأ المؤشرات الفنية الحية
+  (RSI، المتوسطات المتحركة EMA، الدعوم والمقاومات، السيولة، والتذبذب) ويجيب على أسئلة المستخدم حول السوق.
+"""
 
 import copy
 import json
 import os
 import threading
-import time
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict, Optional
 
@@ -33,7 +38,7 @@ def _deep_merge(defaults: Dict[str, Any], loaded: Dict[str, Any]) -> Dict[str, A
 
 
 class RynMemoryManager:
-    """مخزن الحالة الوحيد: الإعدادات + الدورة + المحفظة + الصفقات + ذاكرة Ryn + المحادثة."""
+    """مخزن الحالة الوحيد: الإعدادات + الدورة + المحفظة + الصفقات + ذاكرة البوت + المحادثة."""
 
     def __init__(self, file_path: str = "./ryn_memory.json") -> None:
         self.file_path = os.getenv("MEMORY_FILE_PATH", file_path)
@@ -43,7 +48,7 @@ class RynMemoryManager:
 
     def _default_memory(self) -> Dict[str, Any]:
         return {
-            "assistant_name": "Ryn",
+            "assistant_name": "Ryn Pro Trader",
             "last_updated": _now_iso(),
             "settings": {
                 "symbol": os.getenv("TRADING_PAIR", "RAY/USDT").upper(),
@@ -64,13 +69,19 @@ class RynMemoryManager:
                 "stage": "IDLE_WATCHING",
                 "reference_price": None,
                 "live_price": None,
+                "bid_price": None,
+                "ask_price": None,
                 "buy_trigger_price": None,
                 "lowest_dip_tracked": None,
+                "highest_peak_tracked": None,
+                "raw_entry_price": None,
                 "actual_entry_price": None,
                 "target_sell_price": None,
                 "stop_price": None,
                 "position_amount": 0.0,
+                "gross_amount": 0.0,
                 "position_cost": 0.0,
+                "dip_ticks": 0,
             },
             "wallet": {
                 "base": None,
@@ -122,9 +133,9 @@ class RynMemoryManager:
     def write_self_observation(self, tag: str, note: str) -> None:
         def _w(s: Dict[str, Any]) -> None:
             s["ryn_self_written_market_memory"].insert(
-                0, {"time": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M"), "tag": tag, "note": note}
+                0, {"time": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"), "tag": tag, "note": note}
             )
-            s["ryn_self_written_market_memory"] = s["ryn_self_written_market_memory"][:30]
+            s["ryn_self_written_market_memory"] = s["ryn_self_written_market_memory"][:40]
 
         self.update(_w)
 
@@ -140,14 +151,16 @@ class RynMemoryManager:
 
 
 class RynGroqAssistant:
+    """شخصية متداول ومحلل سوق محترف (للشات وتحليل السوق فقط دون التدخل في تنفيذ الصفقات)."""
+
     def __init__(self, memory_manager: RynMemoryManager) -> None:
         self.memory_manager = memory_manager
         self.api_key = os.getenv("GROQ_API_KEY", "")
         self.chat_model = os.getenv("GROQ_MODEL", "openai/gpt-oss-120b")
         self.fast_model = os.getenv("GROQ_FAST_MODEL", "openai/gpt-oss-20b")
-        # نماذج بديلة تلقائياً إذا أغلقت Groq النموذج (llama-3.3 و llama-3.1-8b أُغلقا في أغسطس 2026)
         self.fallbacks = ["openai/gpt-oss-120b", "qwen/qwen3.6-27b", "openai/gpt-oss-20b"]
         self.context_provider: Optional[Callable[[], Dict[str, Any]]] = None
+        self.market_analyzer: Optional[Callable[[], Dict[str, Any]]] = None
         self.client = None
         if self.api_key and Groq is not None:
             try:
@@ -167,7 +180,7 @@ class RynGroqAssistant:
             try:
                 kw = dict(kwargs)
                 if name.startswith("openai/gpt-oss"):
-                    kw["extra_body"] = {"reasoning_effort": "low"}  # يقلل التفكير الطويل ويسرّع الرد
+                    kw["extra_body"] = {"reasoning_effort": "low"}
                 resp = self.client.chat.completions.create(model=name, **kw)
                 if not (resp.choices[0].message.content or "").strip():
                     raise ValueError("رد فارغ من النموذج")
@@ -181,61 +194,48 @@ class RynGroqAssistant:
                     break
         raise last  # type: ignore
 
-    # ---- فحص القاع (يستدعيه محرك التداول) ----
-    def check_if_dip_stabilized(self, metrics: Dict[str, Any], lowest: float) -> Dict[str, Any]:
-        if not self.client:
-            raise AIUnavailable("no key")
-        mem = self.memory_manager.read_memory()
-        system = (
-            "أنت Ryn، محلل لحظي لزوج تداول. السعر نزل عن المرجع بالنسبة المحددة. "
-            "قرر: WAIT_FALLING_MORE إذا السوق ما زال ينزل بقوة، أو BUY_NOW_REVERSING إذا استقر القاع وبدأ الارتداد. "
-            'أرجع JSON فقط بهذا الشكل: {"action": "...", "reason": "جملة عربية قصيرة"}'
-        )
-        user = {
-            "metrics": metrics,
-            "lowest_dip": lowest,
-            "recent_notes": mem["ryn_self_written_market_memory"][:3],
-        }
-        resp = self._complete(
-            self.fast_model,
-            messages=[
-                {"role": "system", "content": system},
-                {"role": "user", "content": json.dumps(user, ensure_ascii=False)},
-            ],
-            temperature=0.1,
-            max_tokens=800,
-            response_format={"type": "json_object"},
-        )
-        out = json.loads(resp.choices[0].message.content)
-        action = out.get("action")
-        if action not in ("WAIT_FALLING_MORE", "BUY_NOW_REVERSING"):
-            raise ValueError("رد غير مفهوم من النموذج")
-        return {"action": action, "reason": str(out.get("reason", ""))[:200]}
-
-    # ---- المحادثة الحقيقية ----
+    # ---- شات المتداول المحترف ومحلل السوق ----
     def chat_with_trader(self, user_message: str) -> Dict[str, Any]:
         if not self.client:
-            raise AIUnavailable("مفتاح GROQ_API_KEY غير مضاف في إعدادات Render، فما بقدر أرد.")
+            raise AIUnavailable("مفتاح GROQ_API_KEY غير مضاف في إعدادات السيرفر، أضفه لتفعيل شات تحليل السوق.")
         live = self.context_provider() if self.context_provider else {}
+        analysis = {}
+        if self.market_analyzer:
+            try:
+                analysis = self.market_analyzer()
+            except Exception:
+                analysis = live.get("market_analysis") or {}
+        else:
+            analysis = live.get("market_analysis") or {}
+
         live_view = {
             "meta": live.get("meta"),
             "settings": live.get("settings"),
-            "bot": live.get("bot"),
+            "bot_status": live.get("bot"),
             "cycle_state": live.get("cycle_state"),
             "wallet": live.get("wallet"),
             "derived": live.get("derived"),
             "stats": live.get("stats"),
+            "technical_analysis": analysis,
             "recent_trades": (live.get("trades_history") or [])[:8],
-            "my_notes": (live.get("ryn_self_written_market_memory") or [])[:6],
+            "market_notes": (live.get("ryn_self_written_market_memory") or [])[:6],
         }
         system = (
-            "أنت Ryn، مساعد تداول ذكي مرتبط ببوت تداول على Binance. جاوب بالعربية بشكل قصير وواضح ومباشر. "
-            "اعتمد فقط على البيانات الحية أدناه (السعر، رصيد المحفظة الحقيقي، الإعدادات، الصفقات). "
-            "ممنوع تخترع أرقام. إذا المحفظة غير مربوطة أو الرصيد null قل ذلك صراحة. "
-            "لا تضمن أرباحاً ولا تتنبأ بالسعر بثقة. أنت لا تنفذ صفقات ولا تغيّر الإعدادات بنفسك؛ "
-            "لتغييرها وجّه المستخدم لأزرار اللوحة. إذا طلب منك تسجّل ملاحظة أو لاحظت شيئاً مهماً، ضعه في memory_note. "
-            'أرجع JSON فقط: {"reply": "ردك", "memory_note": "ملاحظة اختيارية أو فارغ"}\n\n'
-            "البيانات الحية الآن:\n" + json.dumps(live_view, ensure_ascii=False, default=str)
+            "أنت «Ryn»، متداول عملات رقمية محترف ومحلل فني خبير (Institutional Spot & Scalping Analyst) بخبرة تزيد عن 10 سنوات في أسواق الكريبتو وBinance.\n"
+            "مهمتك الوحيدة هي التحدث مع المتداول في الشات، تحليل حركة السوق بعمق واحترافية، قراءة المؤشرات الفنية الحية، وتقديم استشارات تداول ذكية.\n"
+            "أنت مفصول تماماً عن محرك التنفيذ الآلي (المحرك يشتري ويبيع تلقائياً وبسرعة فائقة بدون انتظارك)، لذا دورك هو المستشار والمحلل المحترف.\n\n"
+            "قواعد شخصيتك وأسلوبك كمتداول محترف:\n"
+            "1. تحدث بلهجة متداول محترف، واثق، صريح، ومباشر بالعربية، واستخدم المصطلحات الفنية في مكانها الصحيح (هيكل السوق، الزخم، RSI، المتوسطات EMA9/EMA21/EMA50، الدعم والمقاومة، التذبذب ATR، السيولة والسبريد).\n"
+            "2. اعتمد حصرياً على البيانات الحية والمؤشرات الفنية الموجودة في `technical_analysis` و`cycle_state` و`wallet` أدناه. ممنوع اختراع أي أسعار أو أرقام غير موجودة.\n"
+            "3. عندما يسألك المستخدم عن السوق أو العملة:\n"
+            "   - وضح الاتجاه اللحظي والعام (صاعد / هابط / تجميع عرضي) بناءً على تقاطع EMA9 وEMA21 وEMA50.\n"
+            "   - اذكر قراءة مؤشر القوة النسبية (RSI 14) وهل العملة في منطقة تشبع بيعي (فرصة ارتداد) أو تشبع شرائي (حذر من جني أرباح).\n"
+            "   - حدد أقرب مستويات الدعم والمقاومة الرقمية من البيانات الحية.\n"
+            "   - قدّم نصيحة عملية لإعدادات البوت (مثلاً: هل نسبة النزول للشراء `drop_buy_pct` ونسبة الربح `rise_sell_pct` مناسبتان لتذبذب السوق الحالي أم الأفضل تعديلهما).\n"
+            "4. إذا كان البوت داخل صفقة حالياً (`IN_POSITION`)، قارن سعر التكلفة الفعلي (`actual_entry_price`) بالسعر الحالي وهدف البيع (`target_sell_price`) وأعطِ تقييمك الفني للصفقة.\n"
+            "5. لا تعد بأرباح مضمونة أبداً، بل تكلم بلغة الاحتمالات وإدارة المخاطر كما يفعل كبار المتداولين.\n"
+            '6. أرجع JSON فقط بهذا الشكل: {"reply": "ردك التحليلي المرتب والواضح", "memory_note": "ملاحظة فنية مختصرة لحفظها في الذاكرة أو نص فارغ"}\n\n'
+            "البيانات والمؤشرات الفنية الحية الآن:\n" + json.dumps(live_view, ensure_ascii=False, default=str)
         )
         history = [
             {"role": m["role"], "content": m["content"]}
@@ -246,7 +246,7 @@ class RynGroqAssistant:
         resp = self._complete(
             self.chat_model,
             messages=messages,
-            temperature=0.4,
+            temperature=0.35,
             max_tokens=2000,
             response_format={"type": "json_object"},
         )
@@ -260,5 +260,5 @@ class RynGroqAssistant:
         self.memory_manager.add_chat("user", user_message)
         self.memory_manager.add_chat("assistant", reply)
         if note:
-            self.memory_manager.write_self_observation("ملاحظة من Ryn", note[:300])
+            self.memory_manager.write_self_observation("تحليل Ryn", note[:300])
         return {"reply": reply}
