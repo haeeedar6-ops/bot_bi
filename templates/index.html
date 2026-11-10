@@ -6,7 +6,7 @@
 <meta name="theme-color" content="#0B101E">
 <link rel="manifest" href="/static/manifest.json">
 <link rel="icon" href="/static/icon-192.png">
-<title>Ryn — بوت تداول Binance</title>
+<title>Ryn Pro — بوت التداول السريع + محلل السوق</title>
 <script src="https://cdn.tailwindcss.com/3.4.17"></script>
 <link href="https://fonts.googleapis.com/css2?family=Cairo:wght@400;600;700;800&display=swap" rel="stylesheet">
 <style>
@@ -16,15 +16,15 @@
   .lbl{font-size:11px;color:#94A3B8}
   .inp{width:100%;background:#0B101E;border:1px solid #334155;border-radius:12px;padding:9px 10px;color:#fff;font-size:15px;direction:ltr;text-align:left}
   .inp:focus{outline:none;border-color:#00F5A0}
-  .chip{padding:3px 10px;border-radius:999px;background:#1E293B;color:#CBD5E1;font-size:11px;font-weight:700;border:1px solid #334155}
+  .chip{padding:3px 10px;border-radius:999px;background:#1E293B;color:#CBD5E1;font-size:11px;font-weight:700;border:1px solid #334155;cursor:pointer}
   .chip:active{background:#00F5A0;color:#04130D}
-  .btn{border-radius:14px;font-weight:800;padding:11px 14px;transition:.15s}
-  .btn:disabled{opacity:.5}
+  .btn{border-radius:14px;font-weight:800;padding:11px 14px;transition:.15s;cursor:pointer}
+  .btn:disabled{opacity:.45;cursor:not-allowed}
   @keyframes rf{0%,100%{transform:translateY(0)}50%{transform:translateY(-4px)}}
   .fab{animation:rf 3.2s ease-in-out infinite}
   @keyframes sp{to{transform:rotate(360deg)}}
   .orbit{transform-origin:50px 54px;animation:sp 14s linear infinite}
-  .bub{max-width:86%;padding:8px 12px;border-radius:16px;font-size:13px;line-height:1.6;white-space:pre-wrap;word-break:break-word}
+  .bub{max-width:86%;padding:8px 12px;border-radius:16px;font-size:13px;line-height:1.65;white-space:pre-wrap;word-break:break-word}
   .me{background:#00F5A0;color:#04130D;border-bottom-left-radius:4px;align-self:flex-start}
   .ai{background:#1E293B;color:#F1F5F9;border-bottom-right-radius:4px;align-self:flex-end}
   .err{background:#4C1D1D;color:#FCA5A5;align-self:center;font-size:12px}
@@ -34,7 +34,7 @@
   #chatPanel{display:none}
   #chatPanel.open{display:flex}
   @media(max-width:640px){#chatPanel{inset:auto 0 0 0;height:86vh;border-radius:24px 24px 0 0}}
-  @media(min-width:641px){#chatPanel{left:20px;bottom:104px;width:380px;height:540px;border-radius:24px}}
+  @media(min-width:641px){#chatPanel{left:20px;bottom:104px;width:400px;height:560px;border-radius:24px}}
 </style>
 </head>
 <body class="pb-28">
@@ -44,7 +44,7 @@
     <div class="flex items-center gap-2">
       <img src="/static/icon-192.png" class="w-8 h-8 rounded-lg" alt="">
       <div>
-        <div class="font-extrabold text-sm leading-tight">Ryn <span id="pairTxt" class="text-emerald-400 ltr text-xs"></span></div>
+        <div class="font-extrabold text-sm leading-tight">Ryn Pro <span id="pairTxt" class="text-emerald-400 ltr text-xs"></span></div>
         <div class="text-[10px] text-slate-400"><span id="connDot" class="inline-block w-2 h-2 rounded-full bg-slate-500 align-middle"></span> <span id="connTxt">جاري الاتصال...</span></div>
       </div>
     </div>
@@ -57,8 +57,8 @@
 
 <main class="max-w-3xl mx-auto px-3 py-3 space-y-3">
   <nav class="flex gap-2">
-    <button id="tabT" class="btn flex-1 bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 text-sm">التداول</button>
-    <button id="tabM" class="btn flex-1 bg-slate-800 text-slate-300 text-sm">ذاكرة Ryn <span id="memCount" class="text-[10px] px-1.5 rounded-full bg-purple-500/30 text-purple-200">0</span></button>
+    <button id="tabT" class="btn flex-1 bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 text-sm">التداول الذكي السريع</button>
+    <button id="tabM" class="btn flex-1 bg-slate-800 text-slate-300 text-sm">سجل الملاحظات <span id="memCount" class="text-[10px] px-1.5 rounded-full bg-purple-500/30 text-purple-200">0</span></button>
   </nav>
 
   <div id="errBanner" class="hidden card border-red-500/50 bg-red-500/10 text-red-300 text-sm"></div>
@@ -69,7 +69,7 @@
     <div class="card">
       <div class="flex items-center justify-between mb-3">
         <div>
-          <div class="lbl">حالة البوت</div>
+          <div class="lbl">حالة محرك التداول</div>
           <div id="stageTxt" class="font-extrabold text-base">--</div>
         </div>
         <span id="runBadge" class="text-xs px-3 py-1 rounded-full bg-slate-700 text-slate-300">متوقف</span>
@@ -78,26 +78,54 @@
         <button id="btnStart" class="btn bg-emerald-500 text-slate-950">▶ تشغيل البوت</button>
         <button id="btnStop" class="btn bg-red-500/90 text-white">⏹ إيقاف</button>
       </div>
-      <div id="aiLine" class="lbl mt-2"></div>
+      <!-- أزرار التحكم الفوري اليدوي -->
+      <div class="grid grid-cols-3 gap-2 mt-2">
+        <button id="btnForceBuy" class="btn bg-emerald-500/15 border border-emerald-500/40 text-emerald-300 text-xs py-2">🟢 شراء فوري</button>
+        <button id="btnForceSell" class="btn bg-rose-500/15 border border-rose-500/40 text-rose-300 text-xs py-2">🔴 بيع فوري الآن</button>
+        <button id="btnResetCycle" class="btn bg-slate-800 border border-slate-700 text-slate-300 text-xs py-2">🔄 تحديث المرجع</button>
+      </div>
+      <div id="aiLine" class="lbl mt-2.5"></div>
+    </div>
+
+    <!-- نبض السوق الفني اللحظي -->
+    <div class="card space-y-2">
+      <div class="flex items-center justify-between">
+        <div class="font-extrabold text-sm">📊 نبض السوق الفني (مباشر)</div>
+        <span id="mTrend" class="text-xs px-2.5 py-0.5 rounded-full bg-slate-800 text-emerald-300 font-bold">--</span>
+      </div>
+      <div class="grid grid-cols-3 gap-2 text-center pt-1">
+        <div class="bg-[#0B101E] rounded-xl p-2 border border-slate-800">
+          <div class="lbl">مؤشر RSI (14)</div>
+          <div id="mRsi" class="font-extrabold text-sm ltr mt-0.5">--</div>
+        </div>
+        <div class="bg-[#0B101E] rounded-xl p-2 border border-slate-800">
+          <div class="lbl">أقرب دعم</div>
+          <div id="mSup" class="font-extrabold text-sm text-emerald-400 ltr mt-0.5">--</div>
+        </div>
+        <div class="bg-[#0B101E] rounded-xl p-2 border border-slate-800">
+          <div class="lbl">أقرب مقاومة</div>
+          <div id="mRes" class="font-extrabold text-sm text-rose-400 ltr mt-0.5">--</div>
+        </div>
+      </div>
     </div>
 
     <!-- الإعدادات -->
     <div class="card space-y-3">
-      <div class="font-extrabold text-sm">⚙️ إعدادات الشراء والبيع</div>
+      <div class="font-extrabold text-sm">⚙️ إعدادات الشراء والبيع الذكي</div>
       <div>
-        <div class="flex justify-between"><span class="lbl">نسبة النزول للشراء %</span><span class="flex gap-1" data-chips="drop_buy_pct"><button class="chip" data-v="1">1</button><button class="chip" data-v="2">2</button><button class="chip" data-v="3">3</button><button class="chip" data-v="5">5</button></span></div>
+        <div class="flex justify-between"><span class="lbl">نسبة النزول للشراء %</span><span class="flex gap-1" data-chips="drop_buy_pct"><button class="chip" data-v="0.3">0.3</button><button class="chip" data-v="0.5">0.5</button><button class="chip" data-v="1">1</button><button class="chip" data-v="2">2</button></span></div>
         <input id="f_drop_buy_pct" class="inp mt-1" type="number" step="0.1" inputmode="decimal">
       </div>
       <div>
-        <div class="flex justify-between"><span class="lbl">نسبة الارتفاع للبيع %</span><span class="flex gap-1" data-chips="rise_sell_pct"><button class="chip" data-v="1">1</button><button class="chip" data-v="2">2</button><button class="chip" data-v="3">3</button><button class="chip" data-v="5">5</button></span></div>
+        <div class="flex justify-between"><span class="lbl">نسبة الارتفاع للبيع %</span><span class="flex gap-1" data-chips="rise_sell_pct"><button class="chip" data-v="0.3">0.3</button><button class="chip" data-v="0.5">0.5</button><button class="chip" data-v="1">1</button><button class="chip" data-v="2">2</button></span></div>
         <input id="f_rise_sell_pct" class="inp mt-1" type="number" step="0.1" inputmode="decimal">
       </div>
       <div>
-        <div class="flex justify-between"><span class="lbl">مبلغ الشراء بالدولار (<span class="quoteTxt">USDT</span>)</span><span class="flex gap-1" data-chips="order_size_usdt"><button class="chip" data-v="10">10</button><button class="chip" data-v="25">25</button><button class="chip" data-v="50">50</button><button class="chip" data-v="100">100</button></span></div>
-        <input id="f_order_size_usdt" class="inp mt-1" type="number" step="1" inputmode="decimal">
+        <div class="flex justify-between"><span class="lbl">مبلغ الشراء بالدولار (<span class="quoteTxt">USDT</span>)</span><span class="flex gap-1" data-chips="order_size_usdt"><button class="chip" data-v="8">8</button><button class="chip" data-v="10">10</button><button class="chip" data-v="25">25</button><button class="chip" data-v="50">50</button></span></div>
+        <input id="f_order_size_usdt" class="inp mt-1" type="number" step="0.5" inputmode="decimal">
       </div>
       <div>
-        <div class="flex justify-between"><span class="lbl">وقف الخسارة % (0 = معطّل)</span><span class="flex gap-1" data-chips="stop_loss_pct"><button class="chip" data-v="0">0</button><button class="chip" data-v="3">3</button><button class="chip" data-v="5">5</button><button class="chip" data-v="10">10</button></span></div>
+        <div class="flex justify-between"><span class="lbl">وقف الخسارة % (0 = معطّل)</span><span class="flex gap-1" data-chips="stop_loss_pct"><button class="chip" data-v="0">0</button><button class="chip" data-v="1">1</button><button class="chip" data-v="2">2</button><button class="chip" data-v="5">5</button></span></div>
         <input id="f_stop_loss_pct" class="inp mt-1" type="number" step="0.1" inputmode="decimal">
       </div>
       <div>
@@ -110,7 +138,7 @@
     <!-- المحفظة -->
     <div class="grid grid-cols-2 gap-2">
       <div class="card"><div class="lbl">رصيد <span class="quoteTxt">USDT</span> (حقيقي)</div><div id="wQuote" class="font-extrabold text-lg ltr">--</div></div>
-      <div class="card"><div class="lbl">رصيد <span class="baseTxt">RAY</span> (حقيقي)</div><div id="wBase" class="font-extrabold text-lg text-emerald-400 ltr">--</div></div>
+      <div class="card"><div class="lbl">رصيد <span class="baseTxt">BTC</span> (حقيقي كامل)</div><div id="wBase" class="font-extrabold text-lg text-emerald-400 ltr">--</div></div>
       <div class="card"><div class="lbl">إجمالي المحفظة</div><div id="wEquity" class="font-extrabold text-lg text-purple-300 ltr">--</div></div>
       <div class="card"><div class="lbl">صافي الربح المحقق (<span id="cycles">0</span> دورة)</div><div id="wProfit" class="font-extrabold text-lg ltr">--</div></div>
     </div>
@@ -122,10 +150,11 @@
       <div class="flex justify-between"><span class="lbl">السعر المرجعي</span><b id="cRef" class="ltr">--</b></div>
       <div class="flex justify-between"><span class="lbl">نقطة الشراء</span><b id="cBuy" class="ltr text-amber-300">--</b></div>
       <div class="flex justify-between"><span class="lbl">أدنى قاع تتبّعته</span><b id="cLow" class="ltr text-purple-300">--</b></div>
-      <div class="flex justify-between"><span class="lbl">سعر الدخول</span><b id="cEntry" class="ltr">--</b></div>
-      <div class="flex justify-between"><span class="lbl">هدف البيع</span><b id="cTarget" class="ltr text-emerald-300">--</b></div>
+      <div class="flex justify-between"><span class="lbl">سعر التكلفة الفعلي (شامل العمولة)</span><b id="cEntry" class="ltr">--</b></div>
+      <div class="flex justify-between"><span class="lbl">أعلى قمة بعد الدخول</span><b id="cPeak" class="ltr text-sky-300">--</b></div>
+      <div class="flex justify-between"><span class="lbl">هدف البيع الصافي</span><b id="cTarget" class="ltr text-emerald-300">--</b></div>
       <div class="flex justify-between"><span class="lbl">وقف الخسارة</span><b id="cStop" class="ltr text-red-300">--</b></div>
-      <div class="flex justify-between"><span class="lbl">ربح/خسارة غير محققة</span><b id="cUnreal" class="ltr">--</b></div>
+      <div class="flex justify-between"><span class="lbl">ربح/خسارة غير محققة (صافي)</span><b id="cUnreal" class="ltr">--</b></div>
     </div>
 
     <!-- الصفقات -->
@@ -141,7 +170,7 @@
 
   <section id="viewM" class="hidden space-y-3">
     <div class="card">
-      <div class="flex justify-between items-center mb-2"><div class="font-extrabold text-sm">🧠 ملاحظات Ryn</div>
+      <div class="flex justify-between items-center mb-2"><div class="font-extrabold text-sm">🧠 سجل عمليات البوت وملاحظات Ryn</div>
         <button id="btnDl" class="chip">تنزيل الذاكرة JSON</button></div>
       <div id="notes" class="space-y-2"></div>
       <div id="noNotes" class="lbl text-center py-3">لسا ما كتب شي.</div>
@@ -150,7 +179,7 @@
 </main>
 
 <!-- زر الشات العائم -->
-<button id="fab" class="fab fixed bottom-5 left-4 z-40 w-16 h-16 rounded-full bg-[#0D1520] border-2 border-emerald-400/60 shadow-[0_0_22px_rgba(0,245,160,.35)] flex items-center justify-center" aria-label="فتح الشات">
+<button id="fab" class="fab fixed bottom-5 left-4 z-40 w-16 h-16 rounded-full bg-[#0D1520] border-2 border-emerald-400/60 shadow-[0_0_22px_rgba(0,245,160,.35)] flex items-center justify-center" aria-label="فتح شات محلل السوق">
   <svg viewBox="0 0 100 105" class="w-12 h-12 overflow-visible">
     <circle class="orbit" cx="50" cy="54" r="44" fill="none" stroke="#00F5A0" stroke-width="1.6" stroke-dasharray="4 4" opacity=".55"/>
     <line x1="50" y1="26" x2="50" y2="13" stroke="#00F5A0" stroke-width="4" stroke-linecap="round"/>
@@ -164,21 +193,28 @@
   <span id="fabDot" class="absolute top-0 right-0 w-4 h-4 rounded-full bg-slate-500 border-2 border-[#0B101E]"></span>
 </button>
 
-<!-- نافذة الشات المنبثقة -->
+<!-- نافذة الشات المنبثقة (شخصية المتداول المحترف ومحلل السوق) -->
 <div id="chatPanel" class="fixed z-50 flex-col bg-[#0F1729] border border-slate-700 shadow-2xl overflow-hidden">
   <div class="flex items-center justify-between px-4 py-3 bg-[#131B2E] border-b border-slate-700">
     <div class="flex items-center gap-2">
       <img src="/static/icon-192.png" class="w-8 h-8 rounded-lg" alt="">
-      <div><div class="font-extrabold text-sm">Ryn</div><div id="chatSub" class="text-[10px] text-slate-400">مساعد التداول</div></div>
+      <div><div class="font-extrabold text-sm">Ryn — المتداول المحترف 📈</div><div id="chatSub" class="text-[10px] text-emerald-400">محلل سوق فني مباشر (منفصل عن تنفيذ الصفقات)</div></div>
     </div>
     <div class="flex gap-2">
       <button id="chatClear" class="chip">مسح</button>
       <button id="chatClose" class="chip" aria-label="إغلاق">✕</button>
     </div>
   </div>
+  <!-- أزرار أسئلة سريعة للمتداول المحترف -->
+  <div class="px-3 py-2 bg-[#111827] border-b border-slate-800 flex gap-1.5 overflow-x-auto whitespace-nowrap">
+    <button type="button" class="chip qPrompt" data-q="حلل لي وضع السوق الحالي للزوج والمؤشرات الفنية (RSI وEMA والدعم والمقاومة).">📊 تحليل السوق الآن</button>
+    <button type="button" class="chip qPrompt" data-q="وين أفضل منطقة دخول شرائي وهدف بيع بناءً على حركة الشموع الحالية؟">🎯 أفضل نقطة دخول</button>
+    <button type="button" class="chip qPrompt" data-q="شو رأيك بإعدادات البوت الحالية (نسبة النزول والارتفاع) مقارنة بتذبذب السوق؟">⚙️ تقييم الإعدادات</button>
+    <button type="button" class="chip qPrompt" data-q="قيّم لي وضع محفظتي وصفقتي الحالية، هل تنصح بالانتظار أم البيع؟">💼 تقييم صفقتي</button>
+  </div>
   <div id="chatBox" class="flex-1 overflow-y-auto p-3 flex flex-col gap-2"></div>
   <form id="chatForm" class="p-2 border-t border-slate-700 flex gap-2 bg-[#131B2E] pb-[max(8px,env(safe-area-inset-bottom))]">
-    <input id="chatInput" class="inp flex-1" style="direction:rtl;text-align:right" placeholder="اسأل Ryn عن السوق أو محفظتك..." autocomplete="off" maxlength="1000">
+    <input id="chatInput" class="inp flex-1" style="direction:rtl;text-align:right" placeholder="اسأل المتداول المحترف Ryn عن اتجاه السوق..." autocomplete="off" maxlength="1000">
     <button id="chatSend" class="btn bg-emerald-500 text-slate-950 px-4">إرسال</button>
   </form>
 </div>
@@ -187,7 +223,11 @@
 
 <script>
 const $ = (id) => document.getElementById(id);
-const STAGES = {IDLE_WATCHING:'يراقب السوق', INSPECTING_DIP:'نزل السعر — يفحص القاع ويصبر', IN_POSITION:'اشترى — ينتظر هدف البيع'};
+const STAGES = {
+  IDLE_WATCHING:'يراقب السوق لحظياً (كل ثانيتين)',
+  INSPECTING_DIP:'وصل لنقطة الشراء — يلتقط أدنى قاع للشراء الفوري ⚡',
+  IN_POSITION:'داخل صفقة — يراقب هدف البيع وحماية الربح 🎯'
+};
 let S = null, dirty = false, chatLoaded = false, sending = false;
 
 // ---------- الاتصال بالسيرفر ----------
@@ -206,15 +246,16 @@ async function api(path, opts = {}) {
 }
 function toast(t) { const e = $('toast'); e.textContent = t; e.classList.remove('hidden'); clearTimeout(toast.t); toast.t = setTimeout(() => e.classList.add('hidden'), 2800); }
 const fmt = (n, d = 4) => (n === null || n === undefined || isNaN(n)) ? '--' : Number(n).toLocaleString('en-US', {maximumFractionDigits: d, minimumFractionDigits: 0});
+const fmtAmt = (n) => (n === null || n === undefined || isNaN(n)) ? '--' : Number(n).toLocaleString('en-US', {maximumFractionDigits: 8, minimumFractionDigits: 0});
 const money = (n) => (n === null || n === undefined) ? '--' : (n >= 0 ? '+' : '') + Number(n).toFixed(4);
 
 // ---------- رسم الحالة ----------
 function render(s) {
-  S = s; const m = s.meta, cs = s.cycle_state, w = s.wallet, b = s.bot, c = s.settings;
+  S = s; const m = s.meta, cs = s.cycle_state, w = s.wallet, b = s.bot, c = s.settings, ma = s.market_analysis || {};
   $('pairTxt').textContent = m.symbol;
   document.querySelectorAll('.quoteTxt').forEach(e => e.textContent = m.quote);
   document.querySelectorAll('.baseTxt').forEach(e => e.textContent = m.base);
-  $('priceTxt').textContent = cs.live_price ? fmt(cs.live_price) + ' ' + m.quote : '--';
+  $('priceTxt').textContent = cs.live_price ? fmt(cs.live_price, 4) + ' ' + m.quote : '--';
   $('modeBadge').textContent = m.mode === 'live' ? '🔴 حقيقي' : '🧪 تجريبي';
   $('modeBadge').className = 'text-[10px] px-2 py-0.5 rounded-full ' + (m.mode === 'live' ? 'bg-red-500/20 text-red-300' : 'bg-amber-500/20 text-amber-300');
   const ok = m.connected && b.price_ok;
@@ -223,26 +264,39 @@ function render(s) {
   $('fabDot').className = 'absolute top-0 right-0 w-4 h-4 rounded-full border-2 border-[#0B101E] ' + (b.running ? 'bg-emerald-400' : 'bg-slate-500');
 
   $('stageTxt').textContent = STAGES[cs.stage] || cs.stage;
-  $('runBadge').textContent = b.running ? '● شغّال' : 'متوقف';
+  $('runBadge').textContent = b.running ? '● شغّال بسرعة ' + (m.poll_seconds || 2) + 'ث' : 'متوقف';
   $('runBadge').className = 'text-xs px-3 py-1 rounded-full ' + (b.running ? 'bg-emerald-500/20 text-emerald-300' : 'bg-slate-700 text-slate-300');
   $('btnStart').disabled = b.running; $('btnStop').disabled = !b.running;
-  const ai = b.last_ai_decision;
-  $('aiLine').textContent = ai ? ('آخر قرار للذكاء الاصطناعي: ' + (ai.action === 'BUY_NOW_REVERSING' ? 'اشترِ الآن' : 'اصبر') + ' — ' + ai.reason) : (m.ai_enabled ? 'الذكاء الاصطناعي جاهز.' : 'الذكاء الاصطناعي غير مفعّل (أضف GROQ_API_KEY).');
+  $('btnForceBuy').disabled = !m.connected || cs.stage === 'IN_POSITION';
+  $('btnForceSell').disabled = !m.connected || (cs.stage !== 'IN_POSITION' && (!w.base_free || w.base_free <= 0));
+
+  $('aiLine').textContent = '⚡ التداول الآلي مستقل 100% عن AI لتنفيذ الشراء والبيع فوراً بدون تأخير • ' + (m.ai_enabled ? 'شات المحلل Ryn جاهز.' : 'شات Ryn يحتاج GROQ_API_KEY.');
+
+  // تحديث نبض السوق الفني
+  $('mTrend').textContent = ma.market_trend || '--';
+  $('mRsi').textContent = (ma.rsi_14 !== null && ma.rsi_14 !== undefined) ? ma.rsi_14 : '--';
+  $('mRsi').className = 'font-extrabold text-sm ltr mt-0.5 ' + (ma.rsi_14 < 35 ? 'text-emerald-400' : (ma.rsi_14 > 68 ? 'text-rose-400' : 'text-amber-300'));
+  $('mSup').textContent = fmt(ma.nearest_support, 2);
+  $('mRes').textContent = fmt(ma.nearest_resistance, 2);
 
   const eb = $('errBanner'); eb.classList.toggle('hidden', !b.last_error); eb.textContent = b.last_error || '';
   const hb = $('haltBanner'); hb.classList.toggle('hidden', !b.halt_reason); hb.textContent = b.halt_reason ? '⛔ توقف البوت: ' + b.halt_reason : '';
 
-  $('wQuote').textContent = w.quote_free === null ? '--' : fmt(w.quote_free, 2);
-  $('wBase').textContent = w.base_free === null ? '--' : fmt(w.base_free, 4);
+  $('wQuote').textContent = w.quote_free === null ? '--' : fmt(w.quote_free, 4);
+  $('wBase').textContent = w.base_free === null ? '--' : fmtAmt(w.base_free);
   $('wEquity').textContent = s.derived.equity === null ? '--' : fmt(s.derived.equity, 2) + ' ' + m.quote;
   const p = s.stats.net_realized_profit_usdt;
   $('wProfit').textContent = money(p); $('wProfit').className = 'font-extrabold text-lg ltr ' + (p >= 0 ? 'text-emerald-400' : 'text-red-400');
   $('cycles').textContent = s.stats.completed_cycles;
   $('syncTxt').textContent = w.synced_at ? 'آخر مزامنة للمحفظة: ' + new Date(w.synced_at).toLocaleTimeString('ar') : '';
 
-  $('cRef').textContent = fmt(cs.reference_price); $('cBuy').textContent = fmt(cs.buy_trigger_price);
-  $('cLow').textContent = fmt(cs.lowest_dip_tracked); $('cEntry').textContent = fmt(cs.actual_entry_price);
-  $('cTarget').textContent = fmt(cs.target_sell_price); $('cStop').textContent = fmt(cs.stop_price);
+  $('cRef').textContent = fmt(cs.reference_price, 4);
+  $('cBuy').textContent = fmt(cs.buy_trigger_price, 4);
+  $('cLow').textContent = fmt(cs.lowest_dip_tracked, 4);
+  $('cEntry').textContent = fmt(cs.actual_entry_price, 4);
+  $('cPeak').textContent = fmt(cs.highest_peak_tracked, 4);
+  $('cTarget').textContent = fmt(cs.target_sell_price, 4);
+  $('cStop').textContent = fmt(cs.stop_price, 4);
   const u = s.derived.unrealized_pnl; $('cUnreal').textContent = u === null ? '--' : money(u);
   $('cUnreal').className = 'ltr ' + (u === null ? '' : (u >= 0 ? 'text-emerald-400' : 'text-red-400'));
 
@@ -252,15 +306,15 @@ function render(s) {
     }
   }
   $('memCount').textContent = s.ryn_self_written_market_memory.length;
-  $('chatSub').textContent = b.running ? 'البوت شغّال' : 'البوت متوقف';
+  $('chatSub').textContent = 'محلل سوق فني مباشر • ' + (ma.market_trend || (b.running ? 'البوت شغّال' : 'البوت متوقف'));
 
   const tb = $('tradesBody'); tb.innerHTML = '';
   $('noTrades').classList.toggle('hidden', s.trades_history.length > 0);
-  s.trades_history.slice(0, 20).forEach(t => {
+  s.trades_history.slice(0, 25).forEach(t => {
     const tr = document.createElement('tr'); tr.className = 'border-t border-slate-800';
     const side = t.side === 'BUY' ? '🟢 شراء' : '🔴 بيع';
     const res = t.profit === null ? '--' : money(t.profit);
-    [new Date(t.time).toLocaleString('ar', {hour:'2-digit', minute:'2-digit', day:'numeric', month:'numeric'}), side, fmt(t.price), fmt(t.amount, 4), res].forEach((v, i) => {
+    [new Date(t.time).toLocaleString('ar', {hour:'2-digit', minute:'2-digit', second:'2-digit', day:'numeric', month:'numeric'}), side, fmt(t.price, 4), fmtAmt(t.amount), res].forEach((v, i) => {
       const td = document.createElement('td'); td.className = 'py-1.5 ltr'; td.textContent = v;
       if (i === 4 && t.profit !== null) td.className += t.profit >= 0 ? ' text-emerald-400' : ' text-red-400';
       tr.appendChild(td);
@@ -283,9 +337,28 @@ async function refresh() { try { render(await api('/api/status')); } catch (e) {
 $('btnStart').onclick = async () => {
   if (S && S.meta.mode === 'live' && !confirm('الوضع حقيقي: البوت رح يشتري ويبيع بأموالك الحقيقية على Binance. تكمّل؟')) return;
   $('btnStart').disabled = true;
-  try { render(await api('/api/bot/start', {method:'POST'})); toast('✅ تم تشغيل البوت'); } catch (e) { toast('⚠️ ' + e.message); alert(e.message); refresh(); }
+  try { render(await api('/api/bot/start', {method:'POST'})); toast('✅ تم تشغيل البوت السريع'); } catch (e) { toast('⚠️ ' + e.message); alert(e.message); refresh(); }
 };
 $('btnStop').onclick = async () => { try { render(await api('/api/bot/stop', {method:'POST'})); toast('⏹ تم إيقاف البوت'); } catch (e) { toast('⚠️ ' + e.message); } };
+$('btnForceBuy').onclick = async () => {
+  if (!confirm('تأكيد تنفيذ أمر شراء فوري بسعر السوق الآن؟')) return;
+  $('btnForceBuy').disabled = true;
+  try { render(await api('/api/bot/force-buy', {method:'POST'})); toast('🟢 تم الشراء الفوري بنجاح'); }
+  catch (e) { toast('⚠️ ' + e.message); alert(e.message); }
+  refresh();
+};
+$('btnForceSell').onclick = async () => {
+  if (!confirm('تأكيد تنفيذ أمر بيع فوري بسعر السوق الآن؟')) return;
+  $('btnForceSell').disabled = true;
+  try { render(await api('/api/bot/force-sell', {method:'POST'})); toast('🔴 تم البيع الفوري بنجاح'); }
+  catch (e) { toast('⚠️ ' + e.message); alert(e.message); }
+  refresh();
+};
+$('btnResetCycle').onclick = async () => {
+  if (!confirm('إعادة ضبط السعر المرجعي وحالة الدورة للسعر الحالي؟')) return;
+  try { render(await api('/api/bot/reset-cycle', {method:'POST'})); toast('🔄 تم تحديث السعر المرجعي'); }
+  catch (e) { toast('⚠️ ' + e.message); }
+};
 $('btnSave').onclick = async () => {
   const body = {
     drop_buy_pct: parseFloat($('f_drop_buy_pct').value), rise_sell_pct: parseFloat($('f_rise_sell_pct').value),
@@ -307,15 +380,24 @@ $('btnDl').onclick = async () => {
   try { const d = await api('/api/memory'); const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob([JSON.stringify(d, null, 2)], {type:'application/json'})); a.download = 'ryn_memory.json'; a.click(); } catch (e) { toast('⚠️ ' + e.message); }
 };
 
-// ---------- الشات المنبثق ----------
+// ---------- الشات المنبثق (المتداول المحترف) ----------
 function addBubble(cls, text) { const d = document.createElement('div'); d.className = 'bub ' + cls; d.textContent = text; $('chatBox').appendChild(d); $('chatBox').scrollTop = $('chatBox').scrollHeight; return d; }
+async function sendChatMsg(text) {
+  if (sending || !text) return;
+  $('chatInput').value = ''; addBubble('me', text); sending = true; $('chatSend').disabled = true;
+  const typing = document.createElement('div'); typing.className = 'bub ai'; typing.innerHTML = '<span class="dot"></span><span class="dot"></span><span class="dot"></span>';
+  $('chatBox').appendChild(typing); $('chatBox').scrollTop = $('chatBox').scrollHeight;
+  try { const r = await api('/api/chat', {method:'POST', body: JSON.stringify({message: text})}); typing.remove(); addBubble('ai', r.reply); refresh(); }
+  catch (e) { typing.remove(); addBubble('err', '⚠️ ' + e.message); }
+  sending = false; $('chatSend').disabled = false; $('chatInput').focus();
+}
 async function openChat() {
   $('chatPanel').classList.add('open'); $('fab').classList.add('hidden');
   if (!chatLoaded) {
     chatLoaded = true;
     try {
       const h = await api('/api/chat/history');
-      if (h.messages.length === 0) addBubble('ai', 'أهلاً! أنا Ryn. بشوف سعرك ومحفظتك الحقيقية على Binance. اسألني أي شي.');
+      if (h.messages.length === 0) addBubble('ai', 'أهلاً بك يا صديقي المتداول! أنا Ryn، محلل السوق الخاص بك 📈.\nتداولك الآلي شغّال الآن بأقصى سرعة وبدون أي تأخير مني، ومهمتي هون أحلل لك السوق والمؤشرات الفنية (RSI، المتوسطات، الدعوم والمقاومات) لحظة بلحظة. اسألني عن السوق أو اضغط على أحد الأزرار فوق!');
       h.messages.forEach(m => addBubble(m.role === 'user' ? 'me' : 'ai', m.content));
     } catch (e) { addBubble('err', e.message); chatLoaded = false; }
   }
@@ -323,20 +405,12 @@ async function openChat() {
 }
 function closeChat() { $('chatPanel').classList.remove('open'); $('fab').classList.remove('hidden'); }
 $('fab').onclick = openChat; $('chatClose').onclick = closeChat;
-$('chatClear').onclick = async () => { try { await api('/api/chat/clear', {method:'POST'}); $('chatBox').innerHTML = ''; addBubble('ai', 'تم مسح المحادثة.'); } catch (e) { toast('⚠️ ' + e.message); } };
-$('chatForm').onsubmit = async (ev) => {
-  ev.preventDefault(); if (sending) return;
-  const text = $('chatInput').value.trim(); if (!text) return;
-  $('chatInput').value = ''; addBubble('me', text); sending = true; $('chatSend').disabled = true;
-  const typing = document.createElement('div'); typing.className = 'bub ai'; typing.innerHTML = '<span class="dot"></span><span class="dot"></span><span class="dot"></span>';
-  $('chatBox').appendChild(typing); $('chatBox').scrollTop = $('chatBox').scrollHeight;
-  try { const r = await api('/api/chat', {method:'POST', body: JSON.stringify({message: text})}); typing.remove(); addBubble('ai', r.reply); refresh(); }
-  catch (e) { typing.remove(); addBubble('err', '⚠️ ' + e.message); }
-  sending = false; $('chatSend').disabled = false; $('chatInput').focus();
-};
+$('chatClear').onclick = async () => { try { await api('/api/chat/clear', {method:'POST'}); $('chatBox').innerHTML = ''; addBubble('ai', 'تم مسح المحادثة. جاهز لتحليل السوق بأي وقت!'); } catch (e) { toast('⚠️ ' + e.message); } };
+$('chatForm').onsubmit = (ev) => { ev.preventDefault(); sendChatMsg($('chatInput').value.trim()); };
+document.querySelectorAll('.qPrompt').forEach(btn => btn.onclick = () => sendChatMsg(btn.dataset.q));
 
 if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js').catch(() => {});
-refresh(); setInterval(refresh, 4000);
+refresh(); setInterval(refresh, 2000);
 </script>
 </body>
 </html>
