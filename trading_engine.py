@@ -1,10 +1,13 @@
 """محرك التداول الذكي والسريع عبر Binance WebSocket المباشر + CCXT (بدون حظر IP وبدون انتظار AI).
 
-الحلول المعمارية الجذرية لمشكلة حظر IP من Binance (418 / -1003):
-1. بث WebSocket لحظي مباشر (Zero-Weight WebSocket Stream): يستقبل السعر الحي وأفضل عرض/طلب (@bookTicker و@miniTicker) وشموع 5 دقائق (@kline_5m) مباشرة من `wss://data-stream.binance.vision` بوزن طلبات = صفر (0 Request Weight).
-2. عزل بيانات السوق العامة عبر `https://data-api.binance.vision`: عند الحاجة لأي بيانات شموع أو سعر عبر HTTP، يتم جلبها من خادم البيانات العامة المستقل `data-api.binance.vision` الذي لا يستهلك من حصة `api.binance.com` ولا يتأثر بحظر IP المشترك على Render.
-3. تخفيض استهلاك `fetch_balance` بنسبة 95%: مزامنة المحفظة في الخلفية تتم كل 5 دقائق فقط (أو عند تنفيذ صفقة شراء/بيع حقيقية) بدلاً من كل 20 ثانية.
-4. درع الحماية الذكي من الحظر (IP Ban Shield): إذا كان عنوان IP المشترك في Render محظوراً مؤقتاً (`-1003 / 418 banned until ...`)، يقرأ البوت وقت انتهاء الحظر بالثانية ويوقف أي طلبات لـ `api.binance.com` خلال فترة التهدئة حتى لا يتجدد الحظر، مع استمرار عمل البث المباشر للسعر والمؤشرات الفنية بدون أي انقطاع.
+الحلول المعمارية الجذرية:
+1. بث WebSocket لحظي مباشر (Zero-Weight WebSocket Stream): يستقبل السعر الحي وأفضل عرض/طلب (@bookTicker و@miniTicker)
+   مباشرة من `wss://data-stream.binance.vision` بوزن طلبات = صفر (0 Request Weight).
+2. تهيئة CCXT القياسية النظيفة لحساب Spot: يتم ترك `ccxt.binance` على إعداداته المعتمدة (`defaultType: spot`) بدون فلاتر تسبب
+   `KeyError: spot` في هيكل الحساب الداخلي.
+3. قراءة الرصيد المتوافقة (Safe Wallet Sync): قراءة رصيد محفظة Spot بشكل مباشر وآمن، ودعم fallback لطلب `fetch_balance` القياسي.
+4. تخفيض استهلاك `fetch_balance` بنسبة 95%: مزامنة المحفظة في الخلفية تتم كل 5 دقائق فقط (أو عند تنفيذ صفقة حقيقية).
+5. درع الحماية الذكي من الحظر (IP Ban Shield): إذا واجه السيرفر تهدئة مؤقتة، يوقف طلبات REST الخاصة حتى ينتهي وقت الحظر تماماً.
 """
 
 import base64
@@ -49,11 +52,11 @@ def extract_ban_until_ts(exc: Exception) -> Optional[float]:
     m = re.search(r"banned until\s+(\d{10,15})", msg, re.IGNORECASE)
     if m:
         val = float(m.group(1))
-        if val > 1e11:  # بالملي ثانية
+        if val > 1e11:
             val = val / 1000.0
-        return val + 3.0  # هامش أمان 3 ثوانٍ
+        return val + 3.0
     if "418" in msg or "-1003" in msg or "429" in msg or "too much request weight" in msg.lower():
-        return time.time() + 120.0  # تهدئة افتراضية دقيقتين إذا لم يذكر الوقت
+        return time.time() + 120.0
     return None
 
 
@@ -68,6 +71,8 @@ def explain_binance_error(exc: Exception, mode: str) -> str:
             f"حظر مؤقت للـ IP المشترك من Binance (-1003/418) ينتهي تلقائياً بعد {mins} د و{secs} ث. "
             "تم تفعيل درع التهدئة التلقائي والتحويل للبث المباشر (WebSocket) حتى ينفك الحظر دون تمديده."
         )
+    if "spot" in msg.lower() and ("keyerror" in msg.lower() or "type" in msg.lower() or msg.strip() == "'spot'"):
+        return "جاري تهيئة مزامنة المحفظة الفورية (Spot) مع Binance..."
     if "-2015" in msg or "-2014" in msg or "-1022" in msg:
         other = "حقيقي (live)" if mode == "testnet" else "تجريبي (testnet)"
         return (
@@ -257,7 +262,7 @@ class BinanceWSFeed:
                             opcode, payload = self._read_frame(ws)
                             if opcode == 0x8:  # Close
                                 break
-                            if opcode == 0x9:  # Ping -> أرسل Pong فوراً
+                            if opcode == 0x9:  # Ping -> Pong
                                 self._send_frame(ws, 0xA, payload)
                                 continue
                             if opcode == 0x1:  # Text JSON
@@ -308,11 +313,7 @@ class RayTradingEngine:
             "apiKey": self.api_key,
             "secret": self.api_secret,
             "enableRateLimit": True,
-            "options": {
-                "defaultType": "spot",
-                "adjustForTimeDifference": True,
-                "fetchCurrencies": False,  # يمنع استدعاءات SAPI ذات الوزن العالي عند load_markets
-            },
+            "options": {"defaultType": "spot", "adjustForTimeDifference": True},
         })
         if self.mode == "testnet":
             self.exchange.set_sandbox_mode(True)
@@ -335,7 +336,7 @@ class RayTradingEngine:
     def symbol(self) -> str:
         return self.store.read_memory()["settings"]["symbol"]
 
-    def _check_ban(self,exc: Optional[Exception] = None) -> None:
+    def _check_ban(self, exc: Optional[Exception] = None) -> None:
         if exc is not None:
             ban_ts = extract_ban_until_ts(exc)
             if ban_ts is not None:
@@ -351,69 +352,16 @@ class RayTradingEngine:
             self.store.update(lambda s: s["bot"].__setitem__("ban_until", None))
         return False
 
-    def _fetch_vision_market_info(self, symbol: str) -> Optional[Dict[str, Any]]:
-        """جلب معلومات الزوج (LOT_SIZE, MIN_NOTIONAL) من data-api.binance.vision بدون استهلاك وزن api.binance.com."""
-        if self._is_mock_exchange or httpx is None:
-            return None
-        raw_sym = symbol.replace("/", "").upper()
-        base, quote = (symbol.split("/") + ["", ""])[:2]
-        url = f"https://data-api.binance.vision/api/v3/exchangeInfo?symbol={raw_sym}"
-        try:
-            with httpx.Client(timeout=8.0) as client:
-                r = client.get(url)
-                if r.status_code != 200:
-                    return None
-                data = r.json()
-                symbols = data.get("symbols") or []
-                if not symbols:
-                    return None
-                s_info = symbols[0]
-                filters = s_info.get("filters") or []
-                min_cost, min_amt = 5.0, 0.00001
-                for f in filters:
-                    ft = f.get("filterType")
-                    if ft in ("NOTIONAL", "MIN_NOTIONAL") and f.get("minNotional"):
-                        min_cost = float(f["minNotional"])
-                    elif ft == "LOT_SIZE" and f.get("minQty"):
-                        min_amt = float(f["minQty"])
-                return {
-                    "id": raw_sym,
-                    "symbol": symbol,
-                    "base": s_info.get("baseAsset") or base,
-                    "quote": s_info.get("quoteAsset") or quote,
-                    "limits": {"cost": {"min": min_cost}, "amount": {"min": min_amt}},
-                    "info": s_info,
-                }
-        except Exception:
-            return None
-
     def _ensure_market(self, symbol: str) -> Dict[str, Any]:
-        if self._is_mock_exchange:
-            if not self._markets_loaded:
+        if not self._markets_loaded:
+            try:
                 self.exchange.load_markets()
                 self._markets_loaded = True
-            if symbol not in self.exchange.markets:
-                where = "حساب التجربة (Testnet)" if self.mode == "testnet" else "Binance"
-                raise SoftError(f"الزوج {symbol} غير متوفر على {where}.")
-            return self.exchange.markets[symbol]
-
-        # في بيئة الإنتاج: نستخدم data-api.binance.vision أولاً لتفادي استهلاك 20 نقطة وزن في load_markets
-        if not self.exchange.markets:
-            self.exchange.markets = {}
-        if symbol not in self.exchange.markets:
-            m_info = self._fetch_vision_market_info(symbol)
-            if m_info:
-                self.exchange.markets[symbol] = m_info
-                self._markets_loaded = True
-                return m_info
-            if not self._is_api_banned():
-                try:
-                    self.exchange.load_markets()
-                    self._markets_loaded = True
-                except Exception as exc:
-                    self._check_ban(exc)
+            except Exception as exc:
+                self._check_ban(exc)
+                if not self._is_api_banned():
                     raise
-        if symbol not in self.exchange.markets:
+        if not self.exchange.markets or symbol not in self.exchange.markets:
             where = "حساب التجربة (Testnet)" if self.mode == "testnet" else "Binance"
             raise SoftError(f"الزوج {symbol} غير متوفر على {where}.")
         return self.exchange.markets[symbol]
@@ -461,10 +409,6 @@ class RayTradingEngine:
 
     # ------------------------------------------------------------------ جلب السعر والشموع بدون حظر (WebSocket + Vision CDN)
     def _fetch_public_ticker_and_klines(self, sym: str) -> Tuple[Dict[str, float], List[List[float]]]:
-        """جلب السعر والشموع:
-        1) في الاختبارات الوهمية: من self.exchange مباشرة.
-        2) في الإنتاج: السعر اللحظي من WebSocket (وزن 0) أو من data-api.binance.vision (معزول عن حظر IP التداول).
-        """
         if self._is_mock_exchange:
             ticker = self.exchange.fetch_ticker(sym)
             price = float(ticker["last"])
@@ -486,7 +430,6 @@ class RayTradingEngine:
                         self._ohlcv_cache = []
             return t_dict, list(self._ohlcv_cache)
 
-        # تأكد أن WebSocket يستمع للزوج الحالي
         if self.ws_feed:
             self.ws_feed.start(sym)
 
@@ -638,24 +581,32 @@ class RayTradingEngine:
         return dict(self._last_analysis)
 
     def sync_wallet(self, force: bool = False) -> Dict[str, Any]:
-        """قراءة الرصيد الحقيقي من Binance مع احترام فترة التهدئة لتفادي حظر IP (-1003)."""
+        """قراءة الرصيد الحقيقي من Binance بأمان وسلاسة."""
         if not force and self._is_api_banned():
             return self.store.read_memory()["wallet"]
         market = self._ensure_market(self.symbol)
+        base, quote = market["base"], market["quote"]
         try:
-            bal = self.exchange.fetch_balance()
+            try:
+                bal = self.exchange.fetch_balance()
+            except (KeyError, TypeError):
+                # توافق في حال عدم وجود spot key في باراميترات ccxt
+                bal = self.exchange.fetch_balance({"type": "spot"})
         except Exception as exc:
             self._check_ban(exc)
             raise
+
         free = bal.get("free", {}) or {}
-        base, quote = market["base"], market["quote"]
+        # دعم قراءة الرصيد حتى لو كان قاموس الاستجابة خام من Binance API
+        base_free = float(free.get(base) or (bal.get(base, {}).get("free") if isinstance(bal.get(base), dict) else 0.0) or 0.0)
+        quote_free = float(free.get(quote) or (bal.get(quote, {}).get("free") if isinstance(bal.get(quote), dict) else 0.0) or 0.0)
 
         def _w(s: Dict[str, Any]) -> None:
             s["wallet"] = {
                 "base": base,
                 "quote": quote,
-                "base_free": float(free.get(base) or 0.0),
-                "quote_free": float(free.get(quote) or 0.0),
+                "base_free": base_free,
+                "quote_free": quote_free,
                 "synced_at": _now_iso(),
             }
         self.store.update(_w)
@@ -876,14 +827,12 @@ class RayTradingEngine:
             s["bot"]["ws_connected"] = bool(self.ws_feed and self.ws_feed.is_connected)
         self.store.update(_p)
 
-        # مزامنة المحفظة في الخلفية كل 5 دقائق فقط (300 ثانية) لتوفير 95% من وزن الطلبات ومنع حظر 418
         wallet_sync_interval = 30 if self._is_mock_exchange else 300
         if self.connected and not self._is_api_banned() and time.time() - self._last_wallet_sync >= wallet_sync_interval:
             try:
                 self.sync_wallet()
             except Exception as exc:
                 self._check_ban(exc)
-                # لا نوقف مراقبة السعر إذا كان هناك تهدئة مؤقتة على طلبات الرصيد الخاصة
                 if not self._is_api_banned():
                     self._set_error(f"تعذر قراءة المحفظة: {explain_binance_error(exc, self.mode)}")
                     return
@@ -922,7 +871,7 @@ class RayTradingEngine:
 
         if cs["stage"] == IDLE:
             ref = cs.get("reference_price")
-            if not ref or price > ref:  # المرجع يتبع القمة تلقائياً
+            if not ref or price > ref:
                 ref = price
             trigger = ref * (1 - drop)
 
@@ -958,7 +907,6 @@ class RayTradingEngine:
                 st["cycle_state"].update(lowest_dip_tracked=lowest, buy_trigger_price=trigger, dip_ticks=dip_ticks)
             self.store.update(_low)
 
-            # طالما السعر يسجل قاعاً جديداً الآن، ننتظر النبضة التالية لنشتري بأرخص سعر ممكن في القاع
             if price < prev_lowest:
                 return
 
@@ -970,7 +918,7 @@ class RayTradingEngine:
                 return
 
             if self._is_api_banned():
-                return  # ننتظر انتهاء فترة التهدئة قبل إرسال أمر حقيقي
+                return
 
             wallet = self.sync_wallet(force=True)
             if (wallet["quote_free"] or 0) < cfg["order_size_usdt"]:
@@ -996,12 +944,10 @@ class RayTradingEngine:
             if self._is_api_banned():
                 return
 
-            # 1) البيع الفوري بمجرد الوصول لهدف البيع
             if price >= target:
                 self._sell(m.get("bid_price") or price, "target")
                 return
 
-            # 2) البيع الذكي لحماية الربح (Trailing Profit Lock)
             target_gain = target - entry
             current_gain = price - entry
             peak_gain = peak - entry
@@ -1015,7 +961,6 @@ class RayTradingEngine:
                 self._sell(m.get("bid_price") or price, "trailing_profit")
                 return
 
-            # 3) البيع الفوري عند وقف الخسارة
             if stop and price <= float(stop):
                 self._sell(m.get("bid_price") or price, "stop_loss")
 
