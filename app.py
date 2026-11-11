@@ -76,7 +76,7 @@ async def service_worker() -> FileResponse:
 
 
 @app.get("/api/health")
-async def health() -> JSONResponse:  # للـ UptimeRobot حتى لا ينام السيرفر على Render
+async def health() -> JSONResponse:
     return JSONResponse({"ok": True})
 
 

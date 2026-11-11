@@ -63,6 +63,8 @@ class RynMemoryManager:
                 "halt_reason": None,
                 "last_tick": None,
                 "price_ok": False,
+                "ws_connected": False,
+                "ban_until": None,
                 "last_ai_decision": None,
             },
             "cycle_state": {
