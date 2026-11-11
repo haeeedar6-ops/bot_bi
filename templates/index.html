@@ -224,7 +224,7 @@
 <script>
 const $ = (id) => document.getElementById(id);
 const STAGES = {
-  IDLE_WATCHING:'يراقب السوق لحظياً (كل ثانيتين)',
+  IDLE_WATCHING:'يراقب السوق لحظياً عبر البث المباشر (WebSocket)',
   INSPECTING_DIP:'وصل لنقطة الشراء — يلتقط أدنى قاع للشراء الفوري ⚡',
   IN_POSITION:'داخل صفقة — يراقب هدف البيع وحماية الربح 🎯'
 };
@@ -260,17 +260,18 @@ function render(s) {
   $('modeBadge').className = 'text-[10px] px-2 py-0.5 rounded-full ' + (m.mode === 'live' ? 'bg-red-500/20 text-red-300' : 'bg-amber-500/20 text-amber-300');
   const ok = m.connected && b.price_ok;
   $('connDot').className = 'inline-block w-2 h-2 rounded-full align-middle ' + (ok ? 'bg-emerald-400' : 'bg-red-500');
-  $('connTxt').textContent = !m.connected ? 'المحفظة غير مربوطة (أضف مفاتيح Binance)' : (b.price_ok ? 'متصل بمحفظة Binance' : 'تعذر جلب السعر');
+  const wsLabel = m.ws_connected ? 'متصل عبر WebSocket المباشر (وزن 0)' : 'متصل بمحفظة Binance';
+  $('connTxt').textContent = !m.connected ? 'المحفظة غير مربوطة (أضف مفاتيح Binance)' : (b.price_ok ? wsLabel : 'جاري إعادة الاتصال...');
   $('fabDot').className = 'absolute top-0 right-0 w-4 h-4 rounded-full border-2 border-[#0B101E] ' + (b.running ? 'bg-emerald-400' : 'bg-slate-500');
 
   $('stageTxt').textContent = STAGES[cs.stage] || cs.stage;
-  $('runBadge').textContent = b.running ? '● شغّال بسرعة ' + (m.poll_seconds || 2) + 'ث' : 'متوقف';
+  $('runBadge').textContent = b.running ? '● شغّال (WebSocket)' : 'متوقف';
   $('runBadge').className = 'text-xs px-3 py-1 rounded-full ' + (b.running ? 'bg-emerald-500/20 text-emerald-300' : 'bg-slate-700 text-slate-300');
   $('btnStart').disabled = b.running; $('btnStop').disabled = !b.running;
   $('btnForceBuy').disabled = !m.connected || cs.stage === 'IN_POSITION';
   $('btnForceSell').disabled = !m.connected || (cs.stage !== 'IN_POSITION' && (!w.base_free || w.base_free <= 0));
 
-  $('aiLine').textContent = '⚡ التداول الآلي مستقل 100% عن AI لتنفيذ الشراء والبيع فوراً بدون تأخير • ' + (m.ai_enabled ? 'شات المحلل Ryn جاهز.' : 'شات Ryn يحتاج GROQ_API_KEY.');
+  $('aiLine').textContent = '⚡ بث أسعار WebSocket مباشر بدون حظر IP • تداول آلي مستقل 100% عن AI • ' + (m.ai_enabled ? 'شات المحلل Ryn جاهز.' : 'شات Ryn يحتاج GROQ_API_KEY.');
 
   // تحديث نبض السوق الفني
   $('mTrend').textContent = ma.market_trend || '--';
@@ -397,7 +398,7 @@ async function openChat() {
     chatLoaded = true;
     try {
       const h = await api('/api/chat/history');
-      if (h.messages.length === 0) addBubble('ai', 'أهلاً بك يا صديقي المتداول! أنا Ryn، محلل السوق الخاص بك 📈.\nتداولك الآلي شغّال الآن بأقصى سرعة وبدون أي تأخير مني، ومهمتي هون أحلل لك السوق والمؤشرات الفنية (RSI، المتوسطات، الدعوم والمقاومات) لحظة بلحظة. اسألني عن السوق أو اضغط على أحد الأزرار فوق!');
+      if (h.messages.length === 0) addBubble('ai', 'أهلاً بك يا صديقي المتداول! أنا Ryn، محلل السوق الخاص بك 📈.\nتداولك الآلي شغّال الآن عبر البث المباشر (WebSocket) بأقصى سرعة وبدون أي حظر IP، ومهمتي هون أحلل لك السوق والمؤشرات الفنية (RSI، المتوسطات، الدعوم والمقاومات) لحظة بلحظة. اسألني عن السوق أو اضغط على أحد الأزرار فوق!');
       h.messages.forEach(m => addBubble(m.role === 'user' ? 'me' : 'ai', m.content));
     } catch (e) { addBubble('err', e.message); chatLoaded = false; }
   }
@@ -410,7 +411,7 @@ $('chatForm').onsubmit = (ev) => { ev.preventDefault(); sendChatMsg($('chatInput
 document.querySelectorAll('.qPrompt').forEach(btn => btn.onclick = () => sendChatMsg(btn.dataset.q));
 
 if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js').catch(() => {});
-refresh(); setInterval(refresh, 2000);
+refresh(); setInterval(refresh, 2500);
 </script>
 </body>
 </html>
